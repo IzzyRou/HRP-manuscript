@@ -24,11 +24,23 @@ library(stringr)
 
 
 **Dcifer run**
-Can skip this section if dcifer was run already. Just import the "dcifer_results.rds"
+Can skip this section if dcifer and moire were run already. Just import the "dcifer_results.rds"
 
 ```{r dcifer run, echo=FALSE, warning = FALSE, message= FALSE}
+moire_input <- read.csv("HRP_moire_input.csv") 
+dat <- moire::load_long_form_data(moire_input)
 
-# Input moire_results
+
+# If you're pretty confident everything is like a true positive, you could go pretty strong, maybe eps_pos_alpha=1, eps_pos_beta=1000. that would translate into like a prior belief of there being 1 false positive every 500 loci
+
+moire_results <- moire::run_mcmc(
+  dat, is_missing = dat$is_missing,
+  allow_relatedness = TRUE,
+  verbose = T, thin = 10, adapt_temp = TRUE)
+
+readr::write_rds(moire_results, file=file.path('moire_results.rds'))
+
+# Input moire_results if already stored
 moire_results <- readr::read_rds("/Users/williamlouie/Dropbox/My Mac (Williams-MacBook-Pro.local)/Downloads/Ethiopia/hrp_moire/moire_results.rds")
 
 ## Create Dcifer input
