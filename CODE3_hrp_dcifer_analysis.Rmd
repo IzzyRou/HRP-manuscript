@@ -1,0 +1,1875 @@
+---
+title: "Dcifer heatmap & network plot"
+author: "William Louie"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Load Libraries
+
+```{r load libraries, warning=FALSE, message=FALSE}
+
+library(moire)
+library(dcifer)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(ggnewscale)
+library(descriptr)
+library(readr)
+library(plotly)
+library(stringr)
+library(ggpubr)
+library(tidyverse)
+library(igraph)
+library(cowplot)
+library(ggplotify)
+library(ggbeeswarm)
+
+```
+
+### Import data
+Import dcifer results: "dcifer_results.rds"
+
+```{r dcifer_heatmap, exercise=TRUE, echo=F}
+
+setwd("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_analysis/hrp_dcifer")
+
+# Import dcifer results (.rds)
+dres <- readr::read_rds("NEW_dcifer_results.rds") 
+# Import rnull > 0.125 too if available
+dres_125 <- readr::read_rds("NEW_dcifer_results_125.rds") 
+
+# relatedness (for rnull = 0)
+dmat <- dres_125[, , "estimate"]
+dmat[upper.tri(dmat)] <- t(dmat)[upper.tri(t(dmat))]
+
+# p-value groups
+dres0 <- dres_125[, , "p_value"]
+dres_low <- -log10(dres0)
+
+dres_low[dres_low > -log10(0.0001)] <- "P << 0.001"
+dres_low[dres_low <= -log10(0.0001) & dres_low > -log10(0.001)] <- "P < 0.001"
+dres_low[dres_low <= -log10(0.001) & dres_low > -log10(0.01)] <- "P < 0.01"
+dres_low[dres_low <= -log10(0.01)] <- "Not Sig"
+dres_low[upper.tri(dres_low)] <- t(dres_low)[upper.tri(dres_low)]
+
+
+matrix_to_longformat <- function(mat) {
+  as.data.frame(mat) |>
+    tibble::rownames_to_column("sample.x") |>
+    tidyr::pivot_longer(-sample.x, names_to = "sample.y", values_to = "value")
+}
+
+to_plot1 <- matrix_to_longformat(dmat)
+
+# dmat, Relatedness    
+hc <- hclust(as.dist(1 - dmat))
+order = hc$order
+clustered_levels = colnames(dmat)[order]
+
+# dres_low, p-value    
+to_plot1 <- to_plot1 |>
+  dplyr::mutate(sample.x = forcats::fct_relevel(sample.x, clustered_levels),
+                sample.y = forcats::fct_relevel(sample.y, clustered_levels))
+
+to_plot2 <- matrix_to_longformat(dres_low)
+to_plot2 <- to_plot2 |>
+  dplyr::mutate(sample.x = forcats::fct_relevel(sample.x, clustered_levels),
+                sample.y = forcats::fct_relevel(sample.y, clustered_levels))
+
+
+```
+
+### Global heatmap
+Dcfer heatmap by variables: within populations & between populations
+Figure 3a
+
+```{r dcifer heatmap_var, exercise=TRUE, echo=F}
+
+metadata_pairs <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/EthiopiaHRP_qPCRpos_collated_26Jan2025.csv") %>%
+  mutate(sample_id = as.character(participantID)) %>%
+  select(sample_id, res_category, PopClass, migrantagworker, Reason_Travel, SeasSAWorker) %>% 
+  mutate(Reason_Travel = case_when(
+    Reason_Travel %in% c("Other: specify", "Other employment/job", "Special event") ~ "Other reason",
+    is.na(Reason_Travel) ~ "None (90d)",
+    TRUE ~ Reason_Travel
+  ))
+
+# Is the person engaged in seasonal agricultural activities in Metema?
+hl_not.seas.ag <- metadata_pairs %>%
+  filter(PopClass == "Highlands" & SeasSAWorker == 0) %>%
+  pull(sample_id)
+seas.mig.worker <- metadata_pairs %>%
+  filter(SeasSAWorker == 1) %>%
+  pull(sample_id)
+ll_resident <- metadata_pairs %>%
+  filter(PopClass == "Lowlands" & SeasSAWorker == 0) %>%
+  pull(sample_id)
+
+metadata_updated <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/EthiopiaHRP_qPCRpos_collated_26Jan2025.csv") %>%
+  mutate(sample_id = as.character(participantID)) %>%
+  select(sample_id, PopClass, SeasSAWorker) %>%
+  mutate_at(vars(sample_id), as.character) %>%
+  mutate(category = case_when(
+    PopClass == "Highlands" & SeasSAWorker == 0 ~ "Highlands",
+    SeasSAWorker == 1 ~ "Seasonal worker",
+    PopClass == "Lowlands" & SeasSAWorker == 0 ~ "Lowlands"
+  ))
+
+
+HL <- metadata_updated %>%
+  filter(PopClass == "Highlands") %>%
+  pull(sample_id)
+LL <- metadata_updated %>%
+  filter(PopClass == "Lowlands") %>%
+  pull(sample_id)
+
+# reorder cluster levels  
+cluster_HL <- clustered_levels[clustered_levels %in% hl_not.seas.ag]
+cluster_SMW <- clustered_levels[clustered_levels %in% seas.mig.worker]
+cluster_LL <- clustered_levels[clustered_levels %in% ll_resident]
+cluster_new <- c(cluster_HL, cluster_LL, cluster_SMW)
+
+
+
+colours_upper <- colorRampPalette(c("#FFFFFF", "#1520A6"))(100)
+colours_lower <- c("P << 0.001" = "#C70039", "P < 0.001" = "#FF5733", "P < 0.01" = "#FFC300", "Not Sig" = "white")
+
+
+## We can plot everything together. Just need to reorder axes by clusters
+to_plot1_all <- to_plot1 %>%
+  mutate(sample.x = factor(sample.x, levels = cluster_new),
+         sample.y = factor(sample.y, levels = cluster_new))
+to_plot2_all <- to_plot2 %>%
+    mutate(sample.x = factor(sample.x, levels = cluster_new),
+         sample.y = factor(sample.y, levels = cluster_new))
+
+# Calculate midpoints for each cluster
+HL_mid <- length(cluster_HL) / 2
+LL_mid <- length(cluster_HL) + (length(cluster_LL) / 2)
+SMW_mid <- length(cluster_HL) + length(cluster_LL) + (length(cluster_SMW) / 2)
+
+
+# Plot
+fig3a <- ggplot(to_plot1_all, aes(x = sample.x, y = sample.y)) +
+  # Upper triangle: Relatedness values
+  geom_tile(data = subset(to_plot1_all, as.numeric(sample.x) > as.numeric(sample.y)), aes(fill = value)) +
+  scale_fill_gradientn(colors = colours_upper, name = "Relatedness") +
+  
+  theme_minimal() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.margin = margin(20, 50, 20, 50) # Increase left margin
+  ) +
+  new_scale_fill() + # Add the p-value layer
+  
+  # Lower triangle: Significance values
+  geom_tile(data = subset(to_plot2_all, as.numeric(sample.x) < as.numeric(sample.y)),
+            aes(fill = value)) +
+  scale_fill_manual(values = colours_lower, name = "Significance", breaks = c("P << 0.001", "P < 0.001", "P < 0.01")) +
+  
+  # Adjust axes to match cluster ordering
+  scale_x_discrete(limits = cluster_new, expand = c(0, 0)) +
+  scale_y_discrete(limits = cluster_new, expand = c(0, 0)) +
+  
+  # Add gridlines at breaks for populations
+  geom_hline(yintercept = length(cluster_HL) + 0.5, linetype = "solid", color = "black", linewidth = 0.6) +
+  geom_hline(yintercept = length(cluster_HL) + length(cluster_LL) + 0.5, linetype = "solid", color = "black", linewidth = 0.6) +
+  geom_vline(xintercept = length(cluster_HL) + 0.5, linetype = "solid", color = "black", linewidth = 0.6) +
+  geom_vline(xintercept = length(cluster_HL) + length(cluster_LL) + 0.5, linetype = "solid", color = "black", linewidth = 0.6) +
+  
+  # Add population labels outside the x-axis
+  annotate("text", x = HL_mid, y = -2, label = "Highland", size = 5, color = "darkgreen", fontface = "bold", vjust = 1) +
+    annotate("text", x = SMW_mid, y = -2, label = "Seas. worker", size = 5, color = "darkorange", fontface = "bold", vjust = 1) +
+  annotate("text", x = LL_mid, y = -2, label = "Lowland", size = 5, color = "purple", fontface = "bold", vjust = 1) +
+  
+  # Add population labels outside the y-axis
+  annotate("text", y = HL_mid, x = -4.5, label = "Highland", size = 5, color = "darkgreen", fontface = "bold", angle = 90, hjust = 0.5, vjust = 0) +
+    annotate("text", y = SMW_mid, x = -4.5, label = "Seas. worker", size = 5, color = "darkorange", fontface = "bold", angle = 90, hjust = 0.5, vjust = 0) +
+  annotate("text", y = LL_mid, x = -4.5, label = "Lowlamd", size = 5, color = "purple", fontface = "bold", angle = 90, hjust = 0.5, vjust = 0) +
+  
+  # Prevent clipping of annotations outside the plot area
+  coord_cartesian(clip = "off")
+
+fig3a
+
+# Combine plots
+ggsave("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/Figures_Tables/HRP_dcifer_relatedness.jpeg", plot = g_all, width = 11, height = 8, dpi = 300)
+
+
+
+```
+
+### P-value corrections
+Dcifer p-value with Benjamini-Hochberg of Bonferroni corrections, code from Jessica (UG_IRS)
+
+```{r p correction, exercise=TRUE, echo=F}
+
+ibd_est <- dres[, , "estimate"]
+ibd_lower <- dres[, , "CI_lower"]
+ibd_upper <- dres[, , "CI_upper"]
+
+# do stupid stuff to make dataframe (there's probably a better way to to this)
+# rnull = 0
+ibd_df <- as.data.frame(ibd_est)
+ibd_df <- tibble::rownames_to_column(ibd_df, var = "sample.x")
+
+ibd_lower_df <- as.data.frame(ibd_lower)
+ibd_lower_df <- tibble::rownames_to_column(ibd_lower_df, var = "sample.x")
+
+ibd_upper_df <- as.data.frame(ibd_upper)
+ibd_upper_df <- tibble::rownames_to_column(ibd_upper_df, var = "sample.x")
+
+#this is a DF with all ibd data in longform between non-matching pairs of samples
+ibd_df_long <- ibd_df %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "ibd"
+  ) %>% filter(!is.na(ibd)) 
+
+# BIND IN CI VALUES TO EACH DF
+CI_lower_df_long <- ibd_lower_df %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "ibd_lower")
+CI_upper_df_long <- ibd_upper_df %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "ibd_upper")
+# bind CIs into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(CI_lower_df_long) %>% 
+  left_join(CI_upper_df_long)
+
+#### BIND IN P VALUES TO EACH DF ###############
+pvals <- dres[, , "p_value"]
+pvals <- as.data.frame(pvals)
+pvals <- tibble::rownames_to_column(pvals, var = "sample.x")
+
+pvals_df_long <- pvals %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "p_value"
+  ) %>% filter(!is.na(p_value)) 
+
+
+# bind pvals into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(pvals_df_long)
+
+# here is where i do corrections for rnull = 0 dataframe
+long_ibd <- ibd_df_long %>% 
+  mutate(p_BH = p.adjust(p_value, method = "BH"), 
+         p_BF = p.adjust(p_value, method = "bonferroni")) %>% 
+  mutate(sig_0.01 = ifelse(p_value < 0.01, 1, 0), sig_0.01_BH = ifelse(p_BH < 0.01, 1, 0), 
+         sig_0.01_BF = ifelse(p_BF < 0.01, 1, 0)) %>% 
+  mutate(sig_0.05 = ifelse(p_value < 0.05, 1, 0), sig_0.05_BH = ifelse(p_BH < 0.05, 1, 0),
+         sig_0.05_BF= ifelse(p_BF < 0.05, 1, 0))
+
+long_ibd %<>%
+  mutate(comparison_type = case_when(
+    sample.x %in% HL & sample.y %in% HL ~ "within Highlands",
+    sample.x %in% LL & sample.y %in% LL ~ "within Lowlands",
+    (sample.x %in% HL & sample.y %in% LL) | (sample.x %in% LL & sample.y %in% HL) ~  "between HL & LL",
+    TRUE ~ "uncharacterized"
+  )) %>%
+  mutate(cat = case_when(
+    grepl(pattern = "within", comparison_type) ~ "Within",
+    grepl(pattern = "between", comparison_type) ~ "Between"))
+
+write_csv(long_ibd, "NEW_long_ibd.csv")
+
+
+
+#### NOW DO THE SAME FOR THE RNULL > 0.125 DATA ###############
+
+# Extract IBD estimates from rnull > 0.125 run
+ibd_est_rp5 <- dres_125[, , "estimate"]
+ibd_lower_rp5 <- dres_125[, , "CI_lower"]
+ibd_upper_rp5 <- dres_125[, , "CI_upper"]
+
+ibd_df_rp5_df  <- as.data.frame(ibd_est_rp5)
+ibd_df_rp5_df  <- tibble::rownames_to_column(ibd_df_rp5_df, var = "sample.x")
+
+ibd_df_rp5_lower_df  <- as.data.frame(ibd_lower_rp5)
+ibd_df_rp5_lower_df  <- tibble::rownames_to_column(ibd_df_rp5_lower_df, var = "sample.x")
+
+ibd_df_rp5_upper_df  <- as.data.frame(ibd_upper_rp5)
+ibd_df_rp5_upper_df  <- tibble::rownames_to_column(ibd_df_rp5_upper_df, var = "sample.x")
+
+#this is a DF with all ibd data in longform between non-matching pairs of samples
+ibd_df_long_rp5 <-  ibd_df_rp5_df %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "ibd"
+  ) %>% filter(!is.na(ibd))
+hist(ibd_df_long_rp5$ibd)
+# CIs for rnull >0.125
+CI_lower_df_long_r5 <- ibd_df_rp5_lower_df %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "ibd_lower")
+CI_upper_df_long_r5 <- ibd_df_rp5_upper_df %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "ibd_upper")
+# bind CIs into long df for rnull > 0.125
+ibd_df_long_rp5 <- ibd_df_long_rp5 %>%
+  left_join(CI_lower_df_long_r5) %>%
+  left_join(CI_upper_df_long_r5)
+pvals_r5 <- dres_125[, , "p_value"]
+pvals_r5 <- as.data.frame(pvals_r5)
+pvals_r5 <- tibble::rownames_to_column(pvals_r5, var = "sample.x")
+# pval 0.05
+pvals_df_long_r5 <- pvals_r5 %>%
+  pivot_longer(
+    cols = -sample.x,
+    names_to = "sample.y",
+    values_to = "p_value"
+  ) %>% filter(!is.na(p_value)) %>%
+  mutate(p_value = p_value/2) # divide by 2 for 1 sided test
+# bind pvals into long df for rnull > 0.125
+ibd_df_long_rp5 <- ibd_df_long_rp5 %>%
+  left_join(pvals_df_long_r5)
+# make p-value very large if r <0.125, set = 1
+ibd_df_long_rp5 <- ibd_df_long_rp5 %>% mutate(p_value = ifelse(ibd <0.125, 1, p_value))
+#here is where i do corrections for rnull > 0.5 dataframe
+long_ibd_rp5 <- ibd_df_long_rp5 %>%
+  mutate(p_BH = p.adjust(p_value, method = "BH"),
+         p_BF = p.adjust(p_value, method = "bonferroni")) %>%
+  mutate(sig_0.01 = ifelse(p_value < 0.01, 1, 0), sig_0.01_BH = ifelse(p_BH < 0.01, 1, 0),
+         sig_0.01_BF = ifelse(p_BF < 0.01, 1, 0)) %>%
+  mutate(sig_0.05 = ifelse(p_value < 0.05, 1, 0), sig_0.05_BH = ifelse(p_BH < 0.05, 1, 0),
+         sig_0.05_BF = ifelse(p_BF < 0.05, 1, 0))
+
+long_ibd_rp5 %<>%
+  mutate(comparison_type = case_when(
+    sample.x %in% HL & sample.y %in% HL ~ "within Highlands",
+    sample.x %in% LL & sample.y %in% LL ~ "within Lowlands",
+    (sample.x %in% HL & sample.y %in% LL) | (sample.x %in% LL & sample.y %in% HL) ~  "between HL & LL",
+    TRUE ~ "uncharacterized"
+  )) %>%
+  mutate(cat = case_when(
+    grepl(pattern = "within", comparison_type) ~ "Within",
+    grepl(pattern = "between", comparison_type) ~ "Between"))
+
+write_csv(long_ibd_rp5, "NEW_long_ibd_125.csv")
+
+```
+
+### Look at different ways of defining highly related pairs 
+##### Standard DCIFER run, adjusting for multiple comparisons (bonferroni and BH)
+##### Testing null that r>0.125, no adjustment for multiple comparisons
+##### Testing null that r>0.125, adjustment for multiple comparisons (bonferroni and BH)
+##### Sig levels 0.05 and 0.01 examined for all methods 
+
+```{r compare_methods, echo= FALSE, warning = FALSE, message = FALSE, fig.show = 'hide'}
+
+################# BONFERRONI CORRECTION,  R NULL = 0 ##########
+
+# for rnull = 0 ibd df (standard), using FWER (bonferroni)
+check_sig_0.05_BF <- long_ibd %>% filter(sig_0.05_BF == 1)
+check_sig_0.01_BF <- long_ibd %>% filter(sig_0.01_BF == 1)
+
+
+print("Number of pairs with significant relatedness after correction after Bonferroni correction (p<0.05)")
+
+print("Number of pairs with significant relatedness after correction after Bonferroni correction, (p<0.01)")
+
+
+
+################# BENJAMINI-HOCHBERG CORRECTION, RNULL = 0  ##########
+
+#for rnull = 0 ibd df (standard), using FDR
+check_sig_0.05 <- long_ibd %>% filter(sig_0.05_BH == 1)
+check_sig_0.01 <- long_ibd %>% filter(sig_0.01_BH == 1)
+
+print("Number of pairs with significant relatedness after BH correction (p<0.05)")
+
+print("Number of pairs with significant relatedness after correction after BH correction (p<0.01)")
+
+#look at significance level BF 
+check_BF <- long_ibd %>% 
+ filter(p_value <= 0.05) %>% 
+  select(p_value, p_BF) %>% 
+  filter(p_BF <= 0.01) %>% summarize(p_value = max(p_value))
+#bonferroni threshold for rnull = 0 df
+p_val_BF <- check_BF$p_value
+
+#look at significance level 
+check_BH <- long_ibd %>% filter(p_value <= 0.05) %>% 
+  select(p_value, p_BH) %>% 
+  filter(p_BH <= 0.01) %>% 
+  summarize(p_value = max(p_value))
+# BH threshold
+p_val_BH <- check_BH$p_value
+
+
+# Plot between pop. relatedness
+long_ibd_between <- long_ibd %>%
+  filter(cat == "Between")
+g_between <- ggplot(data = long_ibd_between, aes(x = log10(p_value), y = ibd, color = comparison_type)) + 
+  geom_point() + 
+  geom_vline(aes(xintercept = log10(0.05), linetype = "0.05")) + 
+  geom_vline(aes(xintercept = log10(p_val_BF), linetype = "Bonferroni")) + 
+  geom_vline(aes(xintercept = log10(p_val_BH), linetype = "Benjamini-Hochberg")) + 
+  scale_linetype_manual(name = "Adjustment Method",
+                        values = c("0.05" = "solid", 
+                                   "Bonferroni" = "dashed", 
+                                   "Benjamini-Hochberg" = "dotdash"),
+                        labels = c("0.05", "Benjamini-Hochberg", "Bonferroni")) +
+  ggtitle("IBD between populations")
+g_between
+
+# Plot between pop. relatedness
+long_ibd_within <- long_ibd %>%
+  filter(cat == "Within")
+g_within <- ggplot(data = long_ibd_within, aes(x = log10(p_value), y = ibd, color = comparison_type)) + 
+  geom_point() + 
+  geom_vline(aes(xintercept = log10(0.05), linetype = "0.05")) + 
+  geom_vline(aes(xintercept = log10(p_val_BF), linetype = "Bonferroni")) + 
+  geom_vline(aes(xintercept = log10(p_val_BH), linetype = "Benjamini-Hochberg")) + 
+  scale_linetype_manual(name = "Adjustment Method",
+                        values = c("0.05" = "solid", 
+                                   "Bonferroni" = "dashed", 
+                                   "Benjamini-Hochberg" = "dotdash"),
+                        labels = c("0.05", "Benjamini-Hochberg", "Bonferroni")) +
+  ggtitle("IBD within populations")
+g_within
+
+
+
+################# BONFERRONI CORRECTION,  R NULL = 0 ##########
+
+# for rnull = 0 ibd df (standard), using FWER (bonferroni)
+check_sig_0.05_BF <- long_ibd_rp5 %>% filter(sig_0.05_BF == 1)
+check_sig_0.01_BF <- long_ibd_rp5 %>% filter(sig_0.01_BF == 1)
+
+print("Number of pairs with significant relatedness after correction after Bonferroni correction (p<0.05)")
+table(check_sig_0.05_BF$sig_0.05_BF)
+
+print("Number of pairs with significant relatedness after correction after Bonferroni correction, (p<0.01)")
+table(check_sig_0.01_BF$sig_0.01_BF)
+
+
+
+########## #################  NOW FOR RNULL > 0.125 ################# ################# 
+
+################# BENJAMINI-HOCHBERG CORRECTION ##########
+
+#for rnull >0.125 ibd df (standard), using FDR
+check_sig_0.05 <- long_ibd_rp5 %>% filter(sig_0.05_BH == 1)
+check_sig_0.01 <- long_ibd_rp5 %>% filter(sig_0.01_BH == 1)
+
+#look at significance level BF 
+check_BF <- long_ibd_rp5 %>% 
+ filter(p_value <= 0.05) %>% 
+  select(p_value, p_BF) %>% 
+  filter(p_BF <= 0.01) %>% summarize(p_value = max(p_value))
+#bonferroni threshold
+p_val_BF_0.125 <- check_BF$p_value
+
+#look at significance level BH
+check_BH <- long_ibd_rp5 %>% filter(p_value <= 0.05) %>% 
+  select(p_value, p_BH) %>% 
+  filter(p_BH <= 0.01) %>% 
+  summarize(p_value = max(p_value))
+
+# BH threshold
+p_val_BH_0.125 <- check_BH$p_value
+
+
+# Plot between pop. relatedness
+long_ibd_rp5_between <- long_ibd_rp5 %>%
+  filter(cat == "Between")
+g.125_between <- ggplot(data = long_ibd_rp5_between, aes(x = log10(p_value), y = ibd, color = comparison_type)) + 
+  geom_point() + 
+  geom_vline(aes(xintercept = log10(0.05), linetype = "0.05")) + 
+  geom_vline(aes(xintercept = log10(p_val_BF), linetype = "Bonferroni")) + 
+  geom_vline(aes(xintercept = log10(p_val_BH), linetype = "Benjamini-Hochberg")) + 
+  scale_linetype_manual(name = "Adjustment Method",
+                        values = c("0.05" = "solid", 
+                                   "Bonferroni" = "dashed", 
+                                   "Benjamini-Hochberg" = "dotdash"),
+                        labels = c("0.01", "Benjamini-Hochberg", "Bonferroni")) +
+  ggtitle("IBD between populations (rnull > 0.125)")
+g.125_between
+
+# Plot between pop. relatedness
+long_ibd_rp5_within <- long_ibd_rp5 %>%
+  filter(cat == "Within")
+g.125_within <- ggplot(data = long_ibd_rp5_within, aes(x = log10(p_value), y = ibd, color = comparison_type)) + 
+  geom_point() + 
+  geom_vline(aes(xintercept = log10(0.05), linetype = "0.05")) + 
+  geom_vline(aes(xintercept = log10(p_val_BF), linetype = "Bonferroni")) + 
+  geom_vline(aes(xintercept = log10(p_val_BH), linetype = "Benjamini-Hochberg")) + 
+  scale_linetype_manual(name = "Adjustment Method",
+                        values = c("0.05" = "solid", 
+                                   "Bonferroni" = "dashed", 
+                                   "Benjamini-Hochberg" = "dotdash"),
+                        labels = c("0.05", "Benjamini-Hochberg", "Bonferroni")) +
+  ggtitle("IBD within populations (rnull > 0.125)")
+g.125_within
+
+
+g_p.thres <- ggarrange(g_between, g_within, g.125_between, g.125_within, ncol = 2, nrow = 2, labels = c("a", "b", "c", "d"))
+ggsave(plot = g_p.thres, "/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/Figures_Tables/SuppFigS2_dcifer_threshold_comparisons.jpeg", height = 12, width = 12, dpi = 200)
+
+```
+
+### IBD distribution
+Pairwise IBD, overall and by group
+Figure 3b
+
+```{r ibd_distribution, exercise=TRUE, echo=F}
+
+# If made already, just import
+long_ibd_rp5 <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_analysis/hrp_dcifer/NEW_long_ibd_125.csv") %>%
+  mutate(sample.x = as.character(sample.x)) %>%
+  mutate(sample.y = as.character(sample.y))
+
+# What is overall IBD (for all samples?)
+ibd_all <- long_ibd_rp5 %>%
+  filter(sig_0.01_BH == 1) %>%
+  summarise(mean_ibd = mean(ibd),
+            median_ibd = median(ibd))
+
+
+##### USE IBD RNULL >0.125, all pairs
+
+# Calc median, counts, and percentages
+ibd_stats <- long_ibd_rp5 %>%
+  left_join(metadata_updated, by = c("sample.x" = "sample_id")) %>%
+  rename(type_x = category) %>%
+  left_join(metadata_updated, by = c("sample.y" = "sample_id")) %>%
+  rename(type_y = category) %>%
+  mutate(
+    type_min = pmin(as.character(type_x), as.character(type_y)),
+    type_max = pmax(as.character(type_x), as.character(type_y))
+  ) %>%
+  group_by(type_min, type_max) %>%
+  summarise(
+    total_pairs = n(),
+    count_greater_than_0.25 = sum(ibd > 0.25),
+    percentage_greater_than_0.25 = (count_greater_than_0.25 / total_pairs) * 100,
+    median_ibd = median(ibd),
+    ibd_is_1 = sum(ibd == 1),
+    percentage_equals_1 = (ibd_is_1 / total_pairs) * 100,
+    .groups = 'drop'
+  )
+write.csv(ibd_stats, "./hrp_dcifer/ibd_pair_stats/ibd_pair_numbers_125_ALL.csv")
+
+
+## Are the proportions of IBD=1 different across groups? Use Chi-squared
+ibd_contingency <- ibd_stats %>%
+  mutate(
+    type_min = as.character(type_min),
+    type_max = as.character(type_max)
+  ) %>%
+  select(type_min, type_max, ibd_is_1, count_greater_than_0.25) %>%
+  mutate(not_ibd_is_1 = count_greater_than_0.25 - ibd_is_1)
+# Convert to matrix for chi-square test
+ibd_matrix <- as.matrix(ibd_contingency[, c("ibd_is_1", "not_ibd_is_1")])
+# Perform chi-square test
+chisq.test(ibd_matrix) # Looks significant
+
+## How about the proportions of related different across groups? Use Chi-squared
+ibd_contingency <- ibd_stats %>%
+  mutate(
+    type_min = as.character(type_min),
+    type_max = as.character(type_max)
+  ) %>%
+  filter(type_max != type_min) %>%
+  select(type_min, type_max, total_pairs, count_greater_than_0.25) %>%
+  mutate(pair = paste(type_max, "-", type_min))
+ibd_matrix <- as.matrix(ibd_contingency[, c("total_pairs", "count_greater_than_0.25")])
+# Perform chi-square test
+chisq.test(ibd_matrix) # Looks significant
+# Let's do the pairwise comparisons. Functions here:
+pairwise_chisq_pairs <- function(data, p.adjust.method = "bonferroni") {
+  groups <- unique(data$pair)  # Get unique pairwise comparisons
+  results <- matrix(NA, length(groups), length(groups), dimnames = list(groups, groups))  
+  for (i in 1:(length(groups) - 1)) {
+    for (j in (i + 1):length(groups)) {
+      # Filter for the two pairs being compared
+      sub_data <- data %>%
+        filter(pair %in% c(groups[i], groups[j]))
+      
+      if (nrow(sub_data) > 0) {
+        # Create contingency table
+        cont_table <- matrix(
+          c(sum(sub_data$total_pairs[sub_data$pair == groups[i]]), 
+            sum(sub_data$count_greater_than_0.25[sub_data$pair == groups[i]]),
+            sum(sub_data$total_pairs[sub_data$pair == groups[j]]), 
+            sum(sub_data$count_greater_than_0.25[sub_data$pair == groups[j]])), 
+          nrow = 2
+        )
+        # Perform Chi-square test
+        test_result <- chisq.test(cont_table)
+        results[i, j] <- test_result$p.value
+        results[j, i] <- test_result$p.value  # Symmetric matrix
+      }
+    }
+  }
+  # Adjust for multiple comparisons
+  results[upper.tri(results)] <- p.adjust(results[upper.tri(results)], method = p.adjust.method)
+  return(results)
+}
+# Run pairwise Chi-square tests for type_max - type_min pairs
+pairwise_results <- pairwise_chisq_pairs(ibd_contingency)
+# Print results
+print(pairwise_results)
+write.csv(pairwise_results, "STATS_ibd_related_pairs_across_populations.csv")
+
+
+
+
+# Use long_ibd_rp5 to plot
+ibd_hist <- long_ibd_rp5 %>%
+  left_join(metadata_updated, by = c("sample.x" = "sample_id")) %>%
+  rename(type_x = category) %>%
+  left_join(metadata_updated, by = c("sample.y" = "sample_id")) %>%
+  rename(type_y = category) %>%
+  mutate(
+    type_min = pmin(as.character(type_x), as.character(type_y)),
+    type_max = pmax(as.character(type_x), as.character(type_y))
+  ) %>%
+  group_by(type_min, type_max, ibd, cat) %>%
+  summarise(count = n(), .groups = "drop")
+# Calculate total counts
+total_pairs_per_group <- ibd_hist %>%
+  group_by(type_min, type_max) %>%
+  summarise(total_pairs = sum(count), .groups = "drop")
+# Compute percentage of total pairs per group
+ibd_hist_perc <- ibd_hist %>%
+  left_join(total_pairs_per_group, by = c("type_min", "type_max")) %>%
+  mutate(percentage = (count / total_pairs) * 100)
+# Extract relevant percentages for annotation
+annotation_data <- ibd_stats %>%
+  mutate(label = paste0("Sig=", round(percentage_greater_than_0.25, 0), "%"))
+
+
+
+#### Only significant/related pairs?
+
+# Filter for BH, and with <0.1 range in IBD upper to lower
+ibd.filt <- long_ibd_rp5 %>%
+    filter(sig_0.01_BH == 1) %>%
+    filter(!(ibd == 1 & (ibd_upper - ibd_lower > 0.1))) %>%
+  left_join(metadata_updated, by = c("sample.x" = "sample_id")) %>%
+  rename(type_x = category) %>%
+  left_join(metadata_updated, by = c("sample.y" = "sample_id")) %>%
+  rename(type_y = category) %>%
+  mutate(
+    type_min = pmin(as.character(type_x), as.character(type_y)),
+    type_max = pmax(as.character(type_x), as.character(type_y))
+  ) %>%
+  group_by(type_min, type_max, ibd, cat) %>%
+  summarise(count = n(), .groups = "drop")
+# Calc median and counts
+ibd.filt_stats <- long_ibd_rp5 %>%
+    filter(sig_0.01_BH == 1) %>%
+    filter(!(ibd == 1 & (ibd_upper - ibd_lower > 0.1))) %>%
+  left_join(metadata_updated, by = c("sample.x" = "sample_id")) %>%
+  rename(type_x = category) %>%
+  left_join(metadata_updated, by = c("sample.y" = "sample_id")) %>%
+  rename(type_y = category) %>%
+  mutate(
+    type_min = pmin(as.character(type_x), as.character(type_y)),
+    type_max = pmax(as.character(type_x), as.character(type_y))
+  ) %>%
+  group_by(type_min, type_max) %>%
+  summarise(
+    total_pairs = n(),
+    count_greater_than_0.25 = sum(ibd > 0.25),
+    percentage_greater_than_0.25 = (count_greater_than_0.25 / total_pairs) * 100,
+    median_ibd = median(ibd),
+    ibd_is_1 = sum(ibd == 1),
+    percentage_equals_1 = (ibd_is_1 / total_pairs) * 100,
+    .groups = 'drop'
+  )
+write.csv(ibd.filt_stats, "./hrp_dcifer/ibd_pair_stats/ibd_pair_numbers_125_onlySIG.csv")
+
+# Calculate total counts
+total_pairs_per_group <- ibd.filt %>%
+  group_by(type_min, type_max) %>%
+  summarise(total_pairs = sum(count), .groups = "drop")
+# Compute percentage of total pairs per group
+ibd.filt_perc <- ibd.filt %>%
+  left_join(total_pairs_per_group, by = c("type_min", "type_max")) %>%
+  mutate(percentage = (count / total_pairs) * 100)
+
+# Is the percentage of identical pairs among significant pairs different?
+ibd.filt_contingency <- ibd.filt_stats %>%
+  mutate(
+    type_min = as.character(type_min),
+    type_max = as.character(type_max)
+  ) %>%
+  select(type_min, type_max, ibd_is_1, count_greater_than_0.25) %>%
+  mutate(not_ibd_is_1 = count_greater_than_0.25 - ibd_is_1)
+# Convert to matrix for chi-square test
+ibd_matrix <- as.matrix(ibd.filt_contingency[, c("ibd_is_1", "not_ibd_is_1")])
+# Perform chi-square test
+chisq.test(ibd_matrix) # Looks significant
+
+
+
+# Plot percentages of total
+# Plot zoomed in version of pairs IBD>0 on secondary y-axis
+
+# Scale by relative max heights
+max_primary <- max(ibd_hist_perc$percentage, na.rm = TRUE)
+max_zoomed  <- max((ibd_hist_perc %>% filter(ibd > 0.25))$percentage, na.rm = TRUE)
+scaling_factor <- (max_primary / max_zoomed) / 4 # Needed to add this to soften scaling
+
+
+# Plot
+breaks_seq <- seq(0, 1, by = 0.1)
+
+fig3b <- ggplot(data = ibd_hist_perc, aes(x = ibd, weight = percentage)) +
+  # Full histogram (dark blue, primary axis)
+  geom_histogram(breaks = breaks_seq, binwidth = 0.05, fill = "darkblue", alpha = 0.6) +
+
+  # Zoomed-in overlay (scaled for plotting, gold)
+  geom_histogram(
+    data = ibd_hist_perc %>% filter(ibd > 0.25),
+    aes(x = ibd, weight = percentage * scaling_factor),
+    breaks = breaks_seq, binwidth = 0.05,
+    fill = "gold", alpha = 0.6
+  ) +
+
+  # Axes and layout
+  scale_y_continuous(
+    name = "% Total Pairs (full, blue)",
+    sec.axis = sec_axis(~ . / scaling_factor, name = "% Total Pairs (zoomed, yellow)")
+  ) +
+  facet_grid(type_min ~ type_max, scales = "free_y") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  ) +
+  xlab("IBD") +
+
+  # Optional text annotations
+  geom_text(data = annotation_data,
+            aes(x = 0.6, y = Inf, label = label),
+            size = 5, vjust = 1.5,
+            inherit.aes = FALSE)
+
+fig3b
+
+
+
+fig3 <- ggarrange(fig3a, fig3b, ncol = 2, 
+  widths = c(2.5, 2),
+  labels = c("a", "b"), font.label = list(size = 18))
+
+ggsave(filename = "/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_analysis/Fig3_IBD_distribution.jpeg", width = 16, height = 6, dpi = 300)
+
+
+```
+
+### Cluster by population
+Global clustering by the 3 populations, for r >0.5 or 1
+Generates Fig4a
+
+```{r cluster_pop, exercise=TRUE, echo=F}
+
+metadata_cluster <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/EthiopiaHRP_qPCRpos_collated_26Jan2025.csv") %>%
+  mutate(name = as.character(participantID)) %>%
+  select(name, PopClass, SeasSAWorker) %>%
+  mutate(category = case_when(
+    PopClass == "Highlands" & SeasSAWorker == 0 ~ "Highland",
+    SeasSAWorker == 1 ~ "Seas. worker",
+    PopClass == "Lowlands" & SeasSAWorker == 0 ~ "Lowland"
+  ))
+
+  ### ------------------- ###
+
+# How many identical pairs would remain if we remove the uncertain ones?
+filtered_edges <- long_ibd_rp5 %>%
+    filter(ibd == 1, sig_0.01_BH == 1) %>%
+  distinct(sample.x, sample.y) # 2537
+filtered_edges <- long_ibd_rp5 %>%
+    filter(ibd == 1, sig_0.01_BH == 1) %>%
+    filter(!(ibd == 1 & (ibd_upper - ibd_lower > 0.05))) %>%
+  distinct(sample.x, sample.y) # 1500
+# 59% of identical pairs remain
+
+  ### ------------------- ###
+
+# How many isolates are there?
+  filtered_edges <- long_ibd_rp5 %>%
+    filter(sig_0.01_BH == 1)
+  # Create a data frame of unique sample names for vertices
+  unique_samples <- unique(c(filtered_edges$sample.x, filtered_edges$sample.y))
+  # Create an igraph object from the filtered edges
+  g <- graph_from_data_frame(filtered_edges, directed = FALSE, vertices = data.frame(name = unique_samples))
+  # Identify isolates (samples that are not in the edges)
+  all_samples <- unique(c(long_ibd_rp5$sample.x, long_ibd_rp5$sample.y))
+  isolates <- setdiff(all_samples, unique_samples)
+  # 560 isolates for IBD = 1, 321 for IBD > 0.5
+
+  ### ------------------- ###
+  
+### Try out a 0.001 BH correction?
+long_ibd_rp5_001 <- long_ibd_rp5 %>% 
+  mutate(sig_0.001_BH = ifelse(p_value < 0.001, 1, 0))
+### Try out a 0.001 BH correction?
+## Tried it, doesn't change much... large clusters still exist. Ignore the above lines.
+
+# Make plotting function
+plot_network <- function(long_ibd, metadata_cluster, relatedness_threshold = 0.5, scaling_factor = 1.0, jitter_amount = 0.1, show_isolates = TRUE, vertex_size = 5, seed = 100, show_legend = TRUE, legend_size = 0.6) {  
+  
+  # Set seed for reproducibility
+  set.seed(seed)
+
+  # Filter edges based on relatedness (ibd) and p-value thresholds
+  filtered_edges <- long_ibd %>%
+    filter(ibd >= relatedness_threshold, sig_0.01_BH == 1) %>%
+    filter(!(ibd == 1 & (ibd_upper - ibd_lower > 0.05))) %>%
+    filter(!(ibd < 1 & (ibd_upper - ibd_lower > 0.2)))
+    
+  # Create a data frame of unique sample names for vertices
+  unique_samples <- unique(c(filtered_edges$sample.x, filtered_edges$sample.y))
+  
+  # Create an igraph object from the filtered edges
+  g <- graph_from_data_frame(filtered_edges, directed = FALSE, vertices = data.frame(name = unique_samples))
+  
+  # Identify isolates (samples that are not in the edges)
+  all_samples <- unique(c(long_ibd$sample.x, long_ibd$sample.y))
+  isolates <- setdiff(all_samples, unique_samples)
+  
+  # Add isolates as vertices in the graph if show_isolates is TRUE
+  if (show_isolates) {
+    g_full <- g + vertices(isolates)
+  } else {
+    g_full <- g
+  }
+  
+  # Merge metadata to get population information for coloring vertices
+  vertex_data <- data.frame(name = V(g_full)$name) %>%
+    left_join(metadata_cluster, by = "name")
+
+  # Assign base colors based on category
+  V(g_full)$color <- ifelse(vertex_data$category == "Highland", "darkgreen",
+                      ifelse(vertex_data$category == "Seas. worker", "darkorange",
+                     ifelse(vertex_data$category == "Lowland", "purple", "grey")))
+
+  # Ensure all vertices have the same shape (circle)
+  V(g_full)$shape <- "circle"
+
+  # Set vertex size and edge attributes
+  V(g_full)$size <- vertex_size
+  E(g_full)$color <- "black"
+  E(g_full)$width <- pmax(filtered_edges$ibd * scaling_factor, 0.8)
+  
+  # Generate layout and create jitter
+  layout <- layout_nicely(g_full)
+  jitter_matrix <- matrix(rnorm(nrow(layout) * 2, mean = 0, sd = jitter_amount), ncol = 2)
+  layout <- layout + jitter_matrix
+
+  # Create the igraph plot
+  plot(g_full, layout = layout, vertex.label = NA, vertex.size = V(g_full)$size,
+       edge.width = E(g_full)$width, edge.color = E(g_full)$color)
+
+  # Add legends if show_legend is TRUE
+  if (show_legend) {
+    legend("bottomleft", legend = c("Highland", "Seas. worker", "Lowland"), 
+           col = c("darkgreen", "darkorange", "purple"), pch = 19, 
+           pt.cex = 1, cex = legend_size, title = "Population")
+  }
+}
+
+
+# Plot clusters (IBD = 1)
+plot_network(long_ibd_rp5, metadata_cluster, relatedness_threshold = 1, scaling_factor = 3, jitter_amount = 0.5, vertex_size = 4, show_isolates = FALSE, seed = 500, show_legend = FALSE)
+# Plot clusters (IBD >0.5)
+plot_network(long_ibd_rp5, metadata_cluster, relatedness_threshold = 0.5, scaling_factor = 3, jitter_amount = 0.5, vertex_size = 4, show_isolates = FALSE, seed = 500, show_legend = FALSE)
+
+
+jpeg("Plot_global_clustering_1and_5.jpg", width = 2000, height = 3000, res = 300)
+# Set up the plotting area to have two plots stacked vertically
+par(mfrow = c(2, 1))  # 2 rows, 1 column
+# Plot clusters (IBD = 1)
+plot_network(long_ibd_rp5, metadata_cluster, relatedness_threshold = 1,
+             scaling_factor = 3, jitter_amount = 0.5, vertex_size = 4, 
+             show_isolates = FALSE, seed = 500,
+             show_legend = TRUE, legend_size = 1.2)
+mtext("r = 1", side = 3, line = -1, cex = 2, font = 2)
+
+# Plot clusters (IBD > 0.5)
+plot_network(long_ibd_rp5, metadata_cluster, relatedness_threshold = 0.5,
+             scaling_factor = 3, jitter_amount = 0.5, vertex_size = 4, 
+             show_isolates = FALSE, seed = 500,
+             show_legend = FALSE)
+mtext("r > 0.5", side = 3, line = -1, cex = 2, font = 2)
+# Reset the plotting area to default
+par(mfrow = c(1, 1))
+# Close the JPEG device
+dev.off()
+
+
+
+```
+
+### Cluster comparisons
+Extract sample names from each cluster and categorizes into population membership.
+Check the clustering for identical pairs across populations. Do the same for r > 0.5.
+Generates Fig4b and SuppFig5
+
+```{r cluster_compare, echo=F}
+
+# Quantify number of clusters across groups
+library(ggvenn)
+
+#### ________ START extracting clusters _______ ########
+
+extract_clusters <- function(long_ibd, metadata_cluster, relatedness_threshold = 1) {
+  # Filter edges strictly for ibd equal to the threshold and p-value below the threshold
+  filtered_edges <- long_ibd %>%
+    filter(ibd >= relatedness_threshold, sig_0.01_BH == 1) %>%
+    filter(!(ibd == 1 & (ibd_upper - ibd_lower > 0.05))) %>%
+    filter(!(ibd < 1 & (ibd_upper - ibd_lower > 0.2)))
+  
+  # Ensure only relevant sample pairs are considered
+  unique_samples <- unique(c(filtered_edges$sample.x, filtered_edges$sample.y))
+  
+  # Create an igraph object using filtered edges
+  g <- graph_from_data_frame(filtered_edges, directed = FALSE, vertices = data.frame(name = unique_samples))
+
+  # Extract clusters strictly from the graph based on the filtered edges
+  cluster_info <- clusters(g)
+  
+  # Create a data frame with sample_id and cluster_id
+  cluster_df <- data.frame(
+    sample_id = names(V(g)),
+    cluster_id = cluster_info$membership
+  )
+  
+  # Ensure the cluster_df only includes samples from the filtered graph
+  cluster_df <- cluster_df %>%
+    filter(sample_id %in% unique(c(filtered_edges$sample.x, filtered_edges$sample.y)))
+  
+  # Return cluster data frame and filtered pairs
+  list(
+    cluster_data = cluster_df,
+    pairs = filtered_edges
+  )
+}
+
+# Execute function
+clusters_0.5 <- extract_clusters(long_ibd_rp5, metadata_cluster, relatedness_threshold = 0.5)
+# Turn into table
+clusters.df <- clusters_0.5$cluster_data
+
+# Now we can filter long_ibd_rp5 for these cluster comparisons only
+## Look at related pairs (IBD > 0.5)
+filtered_edges_0.5 <- long_ibd_rp5 %>%
+  filter(ibd > 0.5, sig_0.01_BH == 1) %>%
+  mutate(sample.x = as.character(sample.x)) %>%
+  mutate(sample.y = as.character(sample.y)) %>%
+  left_join(clusters.df, by = c("sample.x" = "sample_id")) %>%
+  rename(cluster_x = cluster_id) %>%
+  left_join(clusters.df, by = c("sample.y" = "sample_id")) %>%
+  rename(cluster_y = cluster_id) %>%
+  # Filter where cluster_x equals cluster_y
+  filter(cluster_x == cluster_y)
+
+# Compute cluster sizes
+cluster_sizes <- clusters.df %>%
+  group_by(cluster_id) %>%
+  summarise(cluster_size = n())  # Count samples per cluster
+
+# Group clusters by population types for IBD > 0.5
+cluster_populations <- filtered_edges_0.5 %>%
+  left_join(metadata_cluster, by = c("sample.x" = "name")) %>%
+  rename(type_x = category) %>%
+  left_join(metadata_cluster, by = c("sample.y" = "name")) %>%
+  rename(type_y = category) %>%
+  group_by(cluster_x) %>%
+  summarise(
+    has_HL = any(type_x == "Highland" | type_y == "Highland"),
+    has_LL = any(type_x == "Lowland" | type_y == "Lowland"),
+    has_SMW = any(type_x == "Seas. worker" | type_y == "Seas. worker")) %>%
+  left_join(cluster_sizes, by = c("cluster_x" = "cluster_id"))  # Attach cluster size
+write_csv(cluster_populations, "clusters/cluster_sizes_ibd_0.5.csv")
+
+# Export sample info
+clusters_summary <- clusters.df %>%
+  left_join(metadata_pairs, by = "sample_id") %>%
+  arrange(cluster_id)
+write_csv(clusters_summary, "clusters/samples_assigned_to_clusters_ibd_0.5.csv")
+
+
+#### ________ END extracting clusters _______ ########
+
+# Prepare data for the Venn diagram
+cluster_populations_3higher <- cluster_populations %>%
+  filter(cluster_size >= 3)
+venn_data <- list(
+  `Highland` = cluster_populations_3higher %>% filter(has_HL) %>% pull(cluster_x),
+  `Lowland` = cluster_populations_3higher %>% filter(has_LL) %>% pull(cluster_x),
+  `Seas. worker` = cluster_populations_3higher %>% filter(has_SMW) %>% pull(cluster_x)
+)
+
+# Generate a Venn diagram
+fig4b <- ggvenn(venn_data, 
+  fill_color = c("forestgreen", "purple", "darkorange"),
+  show_percentage = TRUE,
+  text_size = 3,
+  set_name_size = 3) +
+   theme(aspect.ratio = 0.9)
+fig4b
+
+# Get ready for plotting venn diagram
+clusters_summary_plot <- clusters_summary %>%
+  left_join(cluster_sizes, by = "cluster_id") %>%
+  left_join(metadata_cluster, by = c("sample_id" = "name")) %>%
+  distinct(cluster_id, cluster_size, category) %>%
+  filter(cluster_size >= 3) %>%
+  arrange(cluster_size)
+
+
+# Identify which populations are in each cluster
+composition_df <- clusters_summary %>%
+  left_join(metadata_cluster, by = c("sample_id" = "name")) %>%
+  group_by(cluster_id) %>%
+  summarise(
+    cluster_size = n(),
+    composition = paste(sort(unique(category)), collapse = " + ")
+  ) %>%
+  ungroup()
+
+# Make Fig4b precursor
+# Filter and merge with sizes
+clusters_summary_plot <- composition_df %>%
+  filter(cluster_size >= 3)
+# Define custom colors for population combinations
+composition_colors <- c(
+  "Highland" = "darkgreen",
+  "Lowland" = "purple",
+  "Seas. worker" = "darkorange",
+  "Highland + Lowland" = "yellow4",
+  "Highland + Seas. worker" = "darkblue",
+  "Lowland + Seas. worker" = "brown",
+  "Highland + Lowland + Seas. worker" = "gray80"
+)
+fig4c <- ggplot(clusters_summary_plot, aes(x = composition, y = cluster_size, fill = composition)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_jitter(width = 0.1, alpha = 0.4, size = 2) +
+  scale_y_log10() +
+  scale_fill_manual(values = composition_colors) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.background = element_blank()
+  ) +
+  xlab("Cluster Population Composition") +
+  ylab("Cluster Size (log10)")
+fig4c
+
+
+#### ________ Supplementary Figure S5 _______ ########
+### Do this for identical pairs/clusters too, for the record ###
+# Execute function again
+clusters_1 <- extract_clusters(long_ibd_rp5, metadata_cluster, relatedness_threshold = 1)
+# Turn into table
+clusters.df1 <- clusters_1$cluster_data
+## Look at related pairs (IBD = 1)
+filtered_edges_1 <- long_ibd_rp5 %>%
+  filter(ibd == 1, sig_0.01_BH == 1) %>%
+  mutate(sample.x = as.character(sample.x)) %>%
+  mutate(sample.y = as.character(sample.y)) %>%
+  left_join(clusters.df, by = c("sample.x" = "sample_id")) %>%
+  rename(cluster_x = cluster_id) %>%
+  left_join(clusters.df, by = c("sample.y" = "sample_id")) %>%
+  rename(cluster_y = cluster_id) %>%
+  filter(cluster_x == cluster_y)
+# Compute cluster sizes
+cluster_sizes1 <- clusters.df1 %>%
+  group_by(cluster_id) %>%
+  summarise(cluster_size = n())
+# Group clusters by population types for IBD = 1
+cluster_populations1 <- filtered_edges_1 %>%
+  left_join(metadata_cluster, by = c("sample.x" = "name")) %>%
+  rename(type_x = category) %>%
+  left_join(metadata_cluster, by = c("sample.y" = "name")) %>%
+  rename(type_y = category) %>%
+  group_by(cluster_x) %>%
+  summarise(
+    has_HL = any(type_x == "Highland" | type_y == "Highland"),
+    has_LL = any(type_x == "Lowland" | type_y == "Lowland"),
+    has_SMW = any(type_x == "Seas. worker" | type_y == "Seas. worker")) %>%
+  left_join(cluster_sizes, by = c("cluster_x" = "cluster_id")) # Attach cluster size
+write_csv(cluster_populations1, "clusters/cluster_sizes_ibd_1.csv")
+# Export sample info
+clusters_summary1 <- clusters.df1 %>%
+  left_join(metadata_pairs, by = "sample_id") %>%
+  arrange(cluster_id)
+write_csv(clusters_summary1, "clusters/samples_assigned_to_clusters_ibd_1.csv")
+# summarize and filter
+clusters_summary1_plot <- clusters_summary1 %>%
+  left_join(cluster_sizes1, by = "cluster_id") %>%
+  left_join(metadata_cluster, by = c("sample_id" = "name")) %>%
+  distinct(cluster_id, cluster_size, category) %>%
+  filter(cluster_size >= 3) %>%
+  arrange(cluster_size)
+# Prepare data for the Venn diagram
+cluster_populations1_3higher <- cluster_populations1 %>%
+  filter(cluster_size >= 3)
+venn_data_1 <- list(
+  `Highland` = cluster_populations1_3higher %>% filter(has_HL) %>% pull(cluster_x),
+  `Lowland` = cluster_populations1_3higher %>% filter(has_LL) %>% pull(cluster_x),
+  `Seas. worker` = cluster_populations1_3higher %>% filter(has_SMW) %>% pull(cluster_x)
+)
+# Generate a Venn diagram
+g_venn_1 <- ggvenn(venn_data_1, 
+  fill_color = c("forestgreen", "purple", "darkorange"),
+  show_percentage = TRUE,
+  text_size = 3,
+  set_name_size = 3) +
+   theme(aspect.ratio = 0.9)
+g_venn_1
+ggsave("SuppFigS5_shared_identical_clusters.jpeg", plot = g_venn_1, height = 5, width = 7, dpi = 300)
+
+#### ________ END Supplementary Figure S5 _______ ########
+
+
+
+```
+
+### Centrality of clusters
+Among clusters that have overlap across populations (intersections on the venn diagram), are SMWs more likely to be central nodes?
+Look at degree and closeness of clusters.
+degree: how many connections in the hub
+closeness: average shortest path to another sample in cluster
+Plots Fig4C
+
+```{r centrality, echo=F}
+
+# Identify the cluster_ids we want (only those with pop. overlap)
+clusters_that_overlap <- cluster_populations %>%
+  filter((has_HL == TRUE & has_LL == TRUE & has_SMW == TRUE) | 
+           (has_HL == TRUE & has_SMW == TRUE) |
+           (has_LL == TRUE & has_SMW == TRUE)) %>% # 24 clusters
+  pull(cluster_x)
+# We will filter for samples in these clusters later
+
+
+### Function for extracting clusters 
+extract_clusters_centrality <- function(long_ibd, metadata_cluster, relatedness_threshold = 0.5) {
+  
+  # Filter edges based on relatedness and p-value thresholds
+  filtered_edges <- long_ibd %>%
+    filter(ibd >= relatedness_threshold, sig_0.01_BH == 1) %>%
+    filter(!(ibd == 1 & (ibd_upper - ibd_lower > 0.05))) %>%
+    filter(!(ibd < 1 & (ibd_upper - ibd_lower > 0.2)))
+  
+  # Extract unique samples from filtered edges
+  unique_samples <- unique(c(filtered_edges$sample.x, filtered_edges$sample.y))
+  
+  # Create an igraph object
+  g <- graph_from_data_frame(filtered_edges, directed = FALSE, vertices = data.frame(name = unique_samples))
+  
+  # Extract clusters from the graph
+  cluster_info <- clusters(g)
+  
+  # Create a data frame with sample IDs and their cluster membership
+  cluster_df <- data.frame(
+    sample_id = names(V(g)),
+    cluster_id = cluster_info$membership
+  )
+  
+  # Ensure only relevant samples are included
+  cluster_df <- cluster_df %>%
+    filter(sample_id %in% unique(c(filtered_edges$sample.x, filtered_edges$sample.y)))
+  
+  # Return both the cluster data and filtered edges
+  list(
+    cluster_data = cluster_df,
+    pairs = filtered_edges,
+    graph = g  # Include the graph object for centrality calculation
+  )
+}
+
+# Compute centrality function
+compute_centrality <- function(g, metadata_cluster) {
+  # Compute centrality measures
+  centrality_data <- data.frame(
+    sample_id = V(g)$name,
+    degree = degree(g),
+    betweenness = betweenness(g, normalized = TRUE),
+    closeness = closeness(g, normalized = TRUE),
+    eigenvector = evcent(g)$vector
+  )
+  
+  # Merge with metadata for category information
+  centrality_data <- centrality_data %>%
+    left_join(metadata_cluster, by = c("sample_id" = "name"))
+  
+  # Arrange by degree centrality
+  centrality_data <- centrality_data %>% arrange(desc(degree))
+  
+  return(centrality_data)
+}
+
+# Apply these 2 functions for IBD >0.5
+clusters_0.5 <- extract_clusters_centrality(long_ibd_rp5, metadata_cluster, relatedness_threshold = 0.5)
+
+# Compute centrality (all)
+centrality_results_0.5 <- compute_centrality(clusters_0.5$graph, metadata_cluster)
+# Compute degree and closeness too
+degree_centrality <- degree(clusters_0.5$graph, normalized = FALSE) # un-normalized
+degree_centrality_norm <- degree(clusters_0.5$graph, normalized = TRUE) 
+closeness_centrality <- closeness(clusters_0.5$graph, normalized = TRUE) 
+
+# Create a data frame to store centrality values
+centrality_summary <- data.frame(
+  sample_id = V(clusters_0.5$graph)$name,
+  degree = degree_centrality,
+  degree_norm = degree_centrality_norm,
+  closeness = closeness_centrality)
+
+# Look at cluster 6, which has 430 related members
+# Merge with sample popclass and cluster info
+centrality_summary_filt <- centrality_summary %>%
+  left_join(metadata_pairs, by = "sample_id") %>%
+  mutate(category = case_when(
+    PopClass == "Highlands" & SeasSAWorker == 0 ~ "Highland",
+    SeasSAWorker == 1 ~ "Seas. worker",
+    PopClass == "Lowlands" & SeasSAWorker == 0 ~ "Lowland"
+  )) %>%
+  left_join(clusters_summary %>%
+              select(sample_id, cluster_id),
+            by = "sample_id") %>%
+  filter(cluster_id == 6) %>%
+  arrange(-degree)
+  
+# Calculate average IBD for samples in these clusters, merge
+nodes <- centrality_summary_filt %>%
+  pull(sample_id)
+centrality_ibd <- long_ibd_rp5 %>%
+  filter(sig_0.01_BH == 1) %>%
+  pivot_longer(cols = c(sample.x, sample.y), values_to = "sample_id") %>%
+  filter(sample_id %in% nodes) %>%
+  group_by(sample_id) %>%
+  summarize(mean_ibd = mean(ibd),
+            median_ibd = median(ibd))
+centrality_summary_filt %<>%
+  left_join(centrality_ibd, by = "sample_id")
+
+# Plot degree and closeness
+fig4d <- ggplot(data = centrality_summary_filt, aes(x = degree_norm, y = closeness, color = category, size = median_ibd)) +
+  geom_point() +  
+    scale_color_manual(values = c("Highland" = "darkgreen", 
+                                "Seas. worker" = "darkorange", 
+                                "Lowland" = "purple")) +
+  scale_size_continuous(range = c(0.5, 7)) +
+  theme_bw() +
+  ylab("Closeness (normalized)") +
+  xlab("Degree (normalized)") +
+  guides(size = guide_legend(title="median IBD"),
+         color = "none")
+fig4d
+
+ggsave("clusters/Plot_centrality_cluster6.jpeg", plot = fig4c, height = 8, width = 9, dpi = 300)
+
+
+### Also save centrality of ALL clusters, for our reference ### 
+
+centrality_summary_all <- centrality_summary %>%
+  left_join(metadata_pairs, by = "sample_id") %>%
+  mutate(category = case_when(
+    PopClass == "Highlands" & SeasSAWorker == 0 ~ "Highland",
+    SeasSAWorker == 1 ~ "Seas. worker",
+    PopClass == "Lowlands" & SeasSAWorker == 0 ~ "Lowland"
+  )) %>%
+  left_join(clusters_summary %>%
+              select(sample_id, cluster_id),
+            by = "sample_id") %>%
+  filter(cluster_id %in% clusters_that_overlap) %>%
+  arrange(-degree)
+# Merge with average IBD for samples in these clusters
+centrality_summary_all %<>%
+  left_join(centrality_ibd, by = "sample_id")
+
+# Plot degree and closeness
+g_centrality_all <- ggplot(data = centrality_summary_all, aes(x = degree_norm, y = closeness, color = category, size = median_ibd)) +
+  geom_point() +  
+    scale_color_manual(values = c("Highland" = "darkgreen", 
+                                "Seas. worker" = "darkorange", 
+                                "Lowland" = "purple")) +
+  scale_size_continuous(range = c(0.5, 7)) +
+  theme_bw() +
+  ylab("Closeness (normalized)") +
+  xlab("Degree (normalized)") +
+  guides(size = guide_legend(title="median IBD"),
+         color = "none")
+g_centrality_all
+
+
+```
+
+### Generate Fig 4
+Combines a, b, and c into a single Figure.
+
+```{r fig4, echo=F}
+
+# Save as a combined Fig4
+library(gridExtra)
+library(gridGraphics)
+
+# Save the output
+jpeg("Fig4ABCD_clustering_combined.jpeg", width = 3500, height = 3800, res = 300)
+
+# Function to capture base R plots as grobs
+plot_base_igraph <- function(plot_fn) {
+  grid.newpage()
+  pushViewport(viewport())
+  grid.echo(plot_fn)
+  grid.grab()
+}
+
+# Define IBD plots
+plot1 <- function() {
+  plot_network(long_ibd_rp5, metadata_cluster, relatedness_threshold = 1, 
+               scaling_factor = 2, jitter_amount = 0.5, vertex_size = 2,
+               show_isolates = FALSE, seed = 500, show_legend = FALSE)
+  mtext("r = 1", side = 3, line = 1, cex = 1, font = 2)
+}
+plot2 <- function() {
+  plot_network(long_ibd_rp5, metadata_cluster, relatedness_threshold = 0.5, 
+               scaling_factor = 2, jitter_amount = 0.5, vertex_size = 2,
+               show_isolates = FALSE, seed = 500, show_legend = FALSE)
+  mtext("r > 0.5", side = 3, line = 1, cex = 1, font = 2)
+}
+
+# Capture IBD grobs
+grob1 <- plot_base_igraph(plot1)
+grob2 <- plot_base_igraph(plot2)
+
+# Combine both IBD plots vertically as one grob for Panel A
+panel_a_combined <- arrangeGrob(
+  grob1, grob2,
+  ncol = 1,
+  heights = c(1, 1)
+)
+
+# Add labels
+add_label <- function(plot, label) {
+  arrangeGrob(
+    plot,
+    top = textGrob(label, x = unit(0.05, "npc"), y = unit(0.95, "npc"),
+                   just = c("left", "top"), gp = gpar(fontsize = 18, fontface = "bold"))
+  )
+}
+
+# Label panels
+panel_a_labeled <- add_label(panel_a_combined, "a")
+fig4b_labeled <- add_label(fig4b, "b")
+fig4c_labeled <- add_label(fig4c, "c")
+fig4d_labeled <- add_label(fig4d, "d")
+
+# Layout matrix: A left column (spans 3 rows), B-D stacked in right column
+layout_matrix <- rbind(
+  c(1, 2),
+  c(1, 3),
+  c(1, 4)
+)
+
+# Arrange the layout
+grid.arrange(
+  panel_a_labeled,  # Combined A (IBD plots)
+  fig4b_labeled,     # B
+  fig4c_labeled,     # C
+  fig4d_labeled,     # D
+  layout_matrix = layout_matrix,
+  widths = c(1.2, 1),  # Give A slightly more width
+  heights = c(1, 1, 1)
+)
+dev.off()
+
+
+
+#--- Create a manual legend grob with title ---#
+legend_title <- textGrob("Population", gp = gpar(fontface = "bold"))
+
+legend_body <- legendGrob(
+  labels = c("Highland", "Seas. worker", "Lowland"),
+  pch = 19,
+  gp = gpar(col = c("darkgreen", "darkorange", "purple"))
+)
+
+#--- Combine title and legend body ---#
+legend_grob <- arrangeGrob(
+  legend_title,
+  legend_body,
+  ncol = 1,
+  heights = unit.c(unit(1, "lines"), unit(1, "null"))
+)
+#--- Export the legend as an image ---#
+jpeg("legend_only.jpeg", width = 800, height = 600, res = 300)
+grid.draw(legend_grob)  # Draw the legend on the output device
+dev.off()
+
+```
+
+### Relatedness between farms
+IBD summaries between and within farms
+Supplementary Figure S4
+
+```{r farm, echo=FALSE, warning = FALSE, message= FALSE}
+
+setwd("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_analysis")
+
+coi_summary <- read.csv("./hrp_moire/NEW_coi_summary.csv")
+
+long_ibd_rp5 <- read.csv("./hrp_dcifer/NEW_long_ibd_125.csv")
+
+smw_farm <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/EthiopiaHRP_qPCRpos_collated_26Jan2025.csv") %>%
+  mutate(sample_id = as.character(participantID)) %>%
+  select(sample_id, farm_name, PopClass, migrantagworker, Reason_Travel, SeasSAWorker) %>%
+  mutate(Reason_Travel = case_when(
+    Reason_Travel %in% c("Other: specify", "Other employment/job", "Special event") ~ "Other reason",
+    is.na(Reason_Travel) ~ "None",
+    TRUE ~ Reason_Travel
+  )) %>%
+  mutate(category = case_when(
+    PopClass == "Highlands" & SeasSAWorker == 0 ~ "Highland",
+    SeasSAWorker == 1 ~ "Seas. worker",
+    PopClass == "Lowlands" & SeasSAWorker == 0 ~ "Lowland"
+  )) %>%
+  filter(category == "Seas. worker")
+
+# Use long_ibd_rp5, filter for only pairs where both sample.x and sample.y are in SMW
+ibd_smw <- long_ibd_rp5 %>%
+  mutate(sample.x = as.character(sample.x)) %>%
+  mutate(sample.y = as.character(sample.y)) %>%
+  filter(sample.x %in% smw_farm$sample_id & sample.y %in% smw_farm$sample_id) %>%
+  filter(sig_0.01_BH == 1) %>% # Take only significant
+  left_join(smw_farm, by = c("sample.x" = "sample_id")) %>%
+  rename(farm_x = farm_name) %>%
+  select(-c(PopClass, Reason_Travel, SeasSAWorker, category, migrantagworker)) %>%
+  left_join(smw_farm, by = c("sample.y" = "sample_id")) %>%
+  rename(farm_y = farm_name)
+
+ibd_smw_summary <- ibd_smw %>%
+  group_by(farm_x, farm_y) %>%
+  summarise(mean_ibd = mean(ibd), median_ibd = median(ibd))
+
+smw_samples <- ibd_smw %>%
+  distinct(sample.x) %>%
+  pull(sample.x)
+
+# Create a full grid of comparisons for farms to get a square structure
+
+# Create a lookup table for farm names, excluding NAs
+unique_farms <- na.omit(unique(c(ibd_smw_summary$farm_x, ibd_smw_summary$farm_y)))
+farm_lookup <- setNames(sprintf("%02d", seq_along(unique_farms)), unique_farms)
+# Function to replace farm names with IDs while keeping NAs
+censor_farm <- function(farm) {
+  ifelse(is.na(farm), NA, farm_lookup[farm])
+}
+# Apply the function to farm_x and farm_y
+farm_grid <- expand.grid(farm_x = unique_farms, farm_y = unique_farms) %>%
+  left_join(ibd_smw_summary, by = c("farm_x", "farm_y")) %>%
+  mutate(
+    farm_x = censor_farm(farm_x),
+    farm_y = censor_farm(farm_y),
+    median_ibd = ifelse(farm_x >= farm_y, median_ibd, NA)  # Mask upper triangle
+  )
+
+# Mask upper triangle to retain only the lower triangle
+farm_grid <- farm_grid %>%
+  mutate(median_ibd = ifelse(farm_x >= farm_y, median_ibd, NA))
+# Plot the heatmap
+g_smw <- ggplot(farm_grid, aes(x = farm_x, y = farm_y, fill = median_ibd)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "plasma", na.value = "gray90") +
+  geom_text(aes(label = ifelse(!is.na(median_ibd), round(median_ibd, 2), "")), 
+            color = "black", size = 2) + # Adjust text color and size as needed
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "gray90", color = NA),
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 90),
+    axis.title = element_blank()
+  ) +
+  labs(fill = "Median IBD")
+g_smw
+ggsave("SuppFigS4_smw_ibd_by_farm.jpeg", plot = g_smw, height = 6, width = 8, dpi = 300)
+
+
+
+```
+
+### Pair densities
+Look at migrantagworker variable...
+- includes whether they do any migrant work at all
+- for criteria, see dictionary
+Supplementary Figure S6
+
+```{r pair_densities, exercise=TRUE, echo=F}
+
+coi_summary_comb <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_analysis/hrp_moire/NEW_coi_summary.csv")
+
+# Define population by where they live
+highland <- metadata_pairs %>%
+  filter(res_category == "Highland") %>%
+  pull(sample_id)
+lowland <- metadata_pairs %>%
+  filter(res_category == "Lowland") %>%
+  pull(sample_id)
+other <- metadata_pairs %>%
+  filter(res_category == "Other") %>%
+  pull(sample_id)
+# To fins sample sizes
+smp_hl <- coi_summary_comb %>%
+  filter(sample_id %in% highland) # 599
+smp_ll <- coi_summary_comb %>%
+  filter(sample_id %in% lowland) # 163
+smp_other <- coi_summary_comb %>%
+  filter(sample_id %in% other) # 418
+
+# To find actual sample sizes
+smp_hl_not.seas.ag <- coi_summary_comb %>%
+  filter(sample_id %in% hl_not.seas.ag) # 583
+smp_hl_not.seas.ag_size <- length(smp_hl_not.seas.ag$sample_id)
+smp_seas.mig.worker <- coi_summary_comb %>%
+  filter(sample_id %in% seas.mig.worker) # 534
+smp_seas.mig.worker <- length(smp_seas.mig.worker$sample_id)
+smp_ll_resident <- coi_summary_comb %>%
+  filter(sample_id %in% ll_resident) # 63
+smp_ll_resident <- length(smp_ll_resident$sample_id)
+
+ibd.sig.filt <- long_ibd_rp5 %>%
+  filter(sig_0.01_BH == 1) %>%
+  filter(!(ibd_upper - ibd_lower > 0.2))
+
+
+# Make function for counting identical pairs, by population category
+count_related_by_category <- function(ibd_data, category_samples, cat_name) {
+  
+  filtered <- ibd.sig.filt %>%
+    filter(ibd >0.25) %>%
+    filter(sample.x %in% category_samples | sample.y %in% category_samples)
+    # pivot_longer(cols = c(sample.x, sample.y), values_to = "sample_id")
+  
+  filtered1 <- filtered %>%
+    filter(sample.x %in% highland | sample.y %in% highland) %>%
+    pivot_longer(cols = c(sample.x, sample.y), values_to = "sample_id") %>%
+    filter(sample_id %in% category_samples) %>%
+    count(sample_id, name = "pair_count") %>%
+    mutate(pair_density = pair_count/599) %>%
+    mutate(pair = "Highlands")
+  filtered2 <- filtered %>%
+    filter(sample.x %in% ll_resident | sample.y %in% ll_resident) %>%
+    pivot_longer(cols = c(sample.x, sample.y), values_to = "sample_id") %>%
+    filter(sample_id %in% category_samples) %>%
+    count(sample_id, name = "pair_count") %>%
+    mutate(pair_density = pair_count/163) %>%
+    mutate(pair = "Lowlands")
+  filtered3 <- filtered %>%
+    filter(sample.x %in% other | sample.y %in% other) %>%
+    pivot_longer(cols = c(sample.x, sample.y), values_to = "sample_id") %>%
+    filter(sample_id %in% category_samples) %>%
+    count(sample_id, name = "pair_count") %>%
+    mutate(pair_density = pair_count/418) %>%
+    mutate(pair = "Other")
+    
+  sample_counts <- rbind(filtered1, filtered2, filtered3)
+  sample_counts %<>%
+    mutate(category = cat_name)
+}
+
+rel_HL_no <- count_related_by_category(ibd.sig.filt, hl_not.seas.ag, "Highland")
+rel_seas.mig_no <- count_related_by_category(ibd.sig.filt, seas.mig.worker, "Seas. worker")
+rel_LL_no <- count_related_by_category(ibd.sig.filt, ll_resident, "Lowland")
+
+rel_merge <- rbind(rel_HL_no, rel_seas.mig_no, rel_LL_no)
+
+rel_merge %<>%
+  left_join(metadata_pairs, by = "sample_id")
+
+ggplot(data = rel_merge, 
+       aes(x = category, y = pair_density)) +
+  geom_violin(fill = "lightgrey", alpha = 0.3, scale = "width", trim = TRUE) + 
+  geom_jitter(width = 0.2, size = 1, aes(color = Reason_Travel)) +
+  facet_wrap(~pair) +
+  # scale_color_manual(values = c("yes" = "blue", "no" = "yellow4")) +
+  theme_bw() +
+  labs(color = "Travel reason") +
+  scale_y_log10() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+  )
+
+library(rstatix)  # For statistical tests
+# Compute Wilcoxon p-values for each 'pair'
+p_values <- rel_merge %>%
+  group_by(pair) %>%
+  pairwise_wilcox_test(pair_density ~ category, p.adjust.method = "bonferroni") %>%
+  add_significance()
+
+# Ensure structure: Keep only necessary columns
+p_values <- p_values %>%
+  left_join(rel_merge %>% 
+      group_by(pair) %>% 
+      summarise(max_y = max(pair_density, na.rm = TRUE)), 
+    by = "pair") %>%
+  group_by(pair) %>%
+  mutate(
+    y.position = max_y + (row_number() - 1) * 0.3 * max_y  # Stagger by 30% of max_y
+  ) %>%
+  ungroup()
+write.csv(p_values, "./hrp_dcifer/ibd_pair_stats/STATS_ibd_pair_density_by_residence.csv")
+
+# plot only significant results
+p_values <- p_values %>% 
+  filter(p.adj.signif != "ns")  
+
+# Now plot again with p-values
+g_pair_combo <- ggplot(data = rel_merge, 
+       aes(x = category, y = pair_density)) +
+  geom_violin(fill = "lightgrey", alpha = 0.3, scale = "width", trim = TRUE) + 
+  geom_jitter(width = 0.2, size = 1, aes(color = Reason_Travel)) +
+  facet_wrap(~pair) +  # Facet by "pair"
+  theme_bw() +
+  labs(color = "Travel reason") +
+  scale_y_log10() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+  ) +
+  ylab("Related pair density") +
+  xlab("Pair category") +
+  stat_pvalue_manual(p_values, label = "p.adj.signif", tip.length = 0.02)
+g_pair_combo
+
+ggsave("SuppFigS6_pair_density.jpeg", plot = g_pair_combo, height = 8, width = 8, dpi = 200)
+
+
+```
+
+### (SKIP) Cluster troubleshooting section
+
+```{r cluster_ts, eval=FALSE, exercise=TRUE, include=FALSE}
+
+######### Troubleshooting ###################
+
+# Filter for minimum cluster membership
+filter_clusters <- function(filtered_edges, min_cluster_size = 2) {
+  # Calculate cluster sizes
+  cluster_sizes <- filtered_edges %>%
+    group_by(cluster_x) %>%
+    tally(name = "cluster_size")
+  # Filter clusters with size greater than the threshold
+  filtered_cluster_data <- filtered_edges %>%
+    left_join(cluster_sizes, by = "cluster_x") %>%
+    filter(cluster_size > min_cluster_size) %>%
+    select(-cluster_size)
+  return(filtered_cluster_data)
+}
+# Filter for clusters with at least N samples
+filtered_clusters_1 <- filter_clusters(filtered_edges_1, min_cluster_size = 3)
+filtered_clusters_0.5 <- filter_clusters(filtered_edges_0.5, min_cluster_size = 3)
+
+
+# Look at percentage of shared alleles from allele data. Calculate with this function:
+calculate_identical_loci <- function(allele_data, filtered_clusters) {
+  
+  # Extract unique samples involved in the clusters
+  cluster_samples <- unique(c(filtered_clusters$sample.x, filtered_clusters$sample.y))
+  
+  # Create a data frame of alleles grouped by sample and locus
+  sample_locus_alleles <- allele_data %>%
+    filter(sample_id %in% cluster_samples) %>%
+    group_by(sample_id, locus) %>%
+    summarise(alleles = list(unique(allele)), .groups = "drop")
+  
+  # Function to compute identical loci percentage for a sample pair
+  identical_loci_percentage <- function(s1, s2) {
+    # Filter data for the two samples
+    s1_data <- sample_locus_alleles %>% filter(sample_id == s1)
+    s2_data <- sample_locus_alleles %>% filter(sample_id == s2)
+    
+    # Find shared loci
+    shared_loci <- intersect(s1_data$locus, s2_data$locus)
+    
+    if (length(shared_loci) == 0) return(0)  # No shared loci
+    
+    # Subset data to shared loci
+    s1_alleles <- s1_data %>% filter(locus %in% shared_loci)
+    s2_alleles <- s2_data %>% filter(locus %in% shared_loci)
+    
+    # Check for identical loci
+    identical_loci <- mapply(function(a1, a2) {
+      all(a1 %in% a2) || all(a2 %in% a1)  # Check if one set is a subset of the other
+    }, s1_alleles$alleles, s2_alleles$alleles)
+    
+    # Calculate percentage of identical loci
+    return(mean(identical_loci) * 100)  # Convert fraction to percentage
+  }
+  
+  # Apply identical loci percentage calculation to each sample pair
+  sample_pairs <- filtered_clusters %>%
+    rowwise() %>%
+    mutate(identical_loci_percentage = identical_loci_percentage(sample.x, sample.y)) %>%
+    ungroup()
+  
+  return(sample_pairs)
+}
+
+# Get shared locus calc
+cluster_data <- calculate_identical_loci(allele_data, filtered_clusters)
+
+coi_med <- coi_summary_comb %>%
+  mutate(sample_id = as.character(sample_id)) %>%
+  select(sample_id, post_coi_med)
+
+cluster_data <- cluster_data %>%
+  mutate(ibd_range = ibd_upper - ibd_lower) %>%
+  left_join(coi_med, by = c("sample.x" = "sample_id")) %>%
+  rename(coi_med_x = post_coi_med) %>%
+  left_join(coi_med, by = c("sample.y" = "sample_id")) %>%
+  rename(coi_med_y = post_coi_med) %>%
+  mutate(coi_diff = abs(coi_med_x - coi_med_y))
+
+# Plot IBD upper and lower bounds for each cluster
+check <- ggplot(data = cluster_data, aes(x = ibd_lower, y = identical_loci_percentage, color = coi_diff)) +
+  geom_point() +
+  facet_wrap(~cluster_x) +
+  ylab("Loci shared (%)") +
+  xlab("IBD range") +
+  scale_color_gradient(
+    low = "yellow4", high = "blue", name = "COI difference")
+ggsave("Plot_loci_vs_ibd.jpeg", plot = check, height = 8, width = 9, dpi = 300)
+
+
+```
+
+### (SKIP, old) Co-residence
+Look at HL cohabitation with members who had malaria diagnosis
+
+```{r HL_mal, exercise=TRUE, echo=F}
+
+plot_network_fam <- function(long_ibd, metadata_cluster, HL_travel, relatedness_threshold = 0.5, pvalue_threshold = 0.05, show_isolates = TRUE, vertex_size = 5, seed = seed) {
+  
+  # Set seed for reproducibility
+  set.seed(seed)
+  # Filter out pairs with large confidence intervals (>0.25)
+  # For IBD = 1, needs to be even more stringent
+  long_ibd %<>%
+    filter(if_else(ibd == 1, (ibd_upper - ibd_lower) < 0.1, (ibd_upper - ibd_lower) < 0.25))
+  # Filter edges based on relatedness (ibd) and p-value thresholds
+  filtered_edges <- long_ibd %>% 
+    filter(ibd >= relatedness_threshold, p_BH < pvalue_threshold)
+  
+  # Create a data frame of unique sample names for vertices
+  unique_samples <- unique(c(filtered_edges$sample.x, filtered_edges$sample.y))
+  
+  # Create an igraph object from the filtered edges
+  g <- graph_from_data_frame(filtered_edges, directed = FALSE, vertices = data.frame(name = unique_samples))
+  
+  # Identify isolates (samples that are not in the edges)
+  all_samples <- unique(c(long_ibd$sample.x, long_ibd$sample.y))
+  isolates <- setdiff(all_samples, unique_samples)
+  
+  # Add isolates as vertices in the graph if show_isolates is TRUE
+  if (show_isolates) {
+    g_full <- g + vertices(isolates)
+  } else {
+    g_full <- g
+  }
+  
+  # Merge metadata to get population information for coloring vertices
+  vertex_data <- data.frame(name = V(g_full)$name) %>% 
+    left_join(metadata_cluster, by = "name") %>% 
+    left_join(HL_travel, by = "name")
+  
+  # Assign vertex attribute 'Population' to the graph
+  if ("Population" %in% names(vertex_data)) {
+    V(g_full)$Population <- vertex_data$Population
+  } else {
+    warning("Population column not found in vertex_data")
+  }
+  
+  # Identify clusters (connected components)
+  clusters <- components(g_full)
+  
+  # Filter clusters to retain only those with at least one HL sample
+  keep_clusters <- sapply(seq_along(clusters$membership), function(c) {
+    members <- which(clusters$membership == c)
+    any(V(g_full)$Population[members] == "HL resident")
+  })
+  
+  # Get the indices of the vertices to keep
+  keep_vertices <- which(keep_clusters[clusters$membership])  # This keeps the correct indices
+  
+  # Subset the graph to keep only the desired clusters
+  if (length(keep_vertices) > 0) {
+    g_filtered <- induced_subgraph(g_full, keep_vertices)
+  } else {
+    stop("No clusters with HL residents found. The graph cannot be plotted.")
+  }
+  
+  # Set vertex colors based on family malaria diagnosis
+  vertex_data <- vertex_data %>%
+    mutate(color = case_when(
+      Population != "HL resident" ~ adjustcolor("lightgray", alpha.f = 0.5),
+      fam_mal == "<30 days" ~ "seagreen1",      
+      fam_mal == "<3 months" ~ "seagreen4",     
+      TRUE ~ "gray18"                               # Default color (e.g., NA values)
+    ))
+  
+  # Safely assign colors to vertices in the filtered graph
+  V(g_filtered)$color <- vertex_data$color[match(V(g_filtered)$name, vertex_data$name)]
+  
+  # Set vertex size and make all edges black
+  V(g_filtered)$size <- vertex_size
+  E(g_filtered)$color <- "black"  # All edges are black
+  E(g_filtered)$width <- 1  # Set a constant width for all edges
+  
+  layout <- layout_with_fr(g_filtered)
+
+  # Create the igraph plot without a title
+  plot(g_filtered, layout = layout, vertex.label = NA, vertex.size = V(g_filtered)$size,
+       edge.width = E(g_filtered)$width, edge.color = E(g_filtered)$color)
+  
+  # Add a legend for vertex colors
+  legend("topright", legend = c("not HL", "none", "<30 days", "<3 months"), 
+         col = c("lightgrey", "gray18", "seagreen1", "seagreen4"), pch = 19, pt.cex = 1.5, title = "Family malaria diagnosis")
+}
+
+
+# Plot clusters
+plot_network_fam(long_ibd_rp5, HL_travel, metadata_cluster, relatedness_threshold = 0.5, pvalue_threshold = p_val_BH_0.125, vertex_size = 5, show_isolates = TRUE, seed = 200)
+
+jpeg("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/Figures_Tables/cluster_HL_fam_diagnosis.jpg", width = 1200, height = 800, res = 150)
+# Plot clusters
+plot_network_fam(long_ibd_rp5, HL_travel, metadata_cluster, relatedness_threshold = 0.5, pvalue_threshold = p_val_BH_0.125, vertex_size = 5, show_isolates = TRUE)
+dev.off()
+
+
+```

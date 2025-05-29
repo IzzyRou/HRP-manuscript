@@ -1,0 +1,584 @@
+---
+title: "HRP_ETH Moire"
+author: "William Louie"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Load libraries and working directory
+
+```{r load libraries, echo=FALSE, warning = FALSE, message= FALSE}
+
+library(moire)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(reshape2)
+library(tidyr)
+library(tidyverse)
+library(stringr)
+library(tools)
+library(purrr)
+library(parallel)
+library(data.table)
+library(vctrs)
+library(plotly)
+library(gridExtra)
+library(scales)
+library(gtsummary)
+library(gt)
+library(ggpubr)
+library(dcifer)
+library(patchwork)
+
+```
+
+### Import moire results and metadata
+
+```{r import, echo=FALSE, warning = FALSE, message= FALSE}
+
+setwd("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_analysis")
+
+# metadata with qpcr
+metadata_qpcr <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/HRP_metadata.csv") %>%
+  mutate(sample_id = as.character(QR_code)) %>%
+  select(sample_id, pfqparul, pvqcopyul)
+# New metadata with reclassifications
+metadata <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/EthiopiaHRP_qPCRpos_collated_26Jan2025.csv") %>%
+  mutate(sample_id = as.character(participantID)) %>%
+  select(sample_id, PopClass, migrantagworker, SeasSAWorker)
+
+# Input
+hrp_moire_input <- read.csv("./hrp_moire/FINAL_moire_input_012725.csv")
+# dat <- moire::load_long_form_data(hrp_moire_input)
+
+# If spitting by site
+hrp_moire_input_hl <- hrp_moire_input %>%
+  filter(PopClass == "Highlands")
+dat_hl <- moire::load_long_form_data(hrp_moire_input_hl)
+
+hrp_moire_input_ll <- hrp_moire_input %>%
+  filter(PopClass == "Lowlands")
+dat_ll <- moire::load_long_form_data(hrp_moire_input_ll)
+
+# Import moire results
+moire_results_hl <- readRDS("./hrp_moire/NEW_moire_results_hl.rds")
+moire_results_ll <- readRDS("./hrp_moire/NEW_moire_results_ll.rds")
+
+
+```
+
+### Combine & summarize
+Fig 2a: COI/eCOI distribution by population
+
+```{r summarize, echo=TRUE}
+
+# COI summaries
+## summarize COI for HL and LL separately too
+coi_hl <- moire::summarize_coi(moire_results_hl)
+ecoi_hl <- moire::summarize_effective_coi(moire_results_hl)
+coi_summary_hl <- coi_hl %>%
+  full_join(ecoi_hl, by = "sample_id")
+coi_ll <- moire::summarize_coi(moire_results_ll)
+ecoi_ll <- moire::summarize_effective_coi(moire_results_ll)
+coi_summary_ll <- coi_ll %>%
+  full_join(ecoi_ll, by = "sample_id")
+coi_summary_comb <- rbind(coi_summary_hl, coi_summary_ll)
+coi_summary_comb <- coi_summary_comb %>%
+  mutate(sample_id = as.character(sample_id)) %>%
+  left_join(metadata, by = "sample_id") %>%
+  left_join(metadata_qpcr, by = "sample_id")
+
+# Get p-values
+variables_to_test <- c("post_coi_mean", "post_coi_med", "post_effective_coi_mean", "post_effective_coi_med")
+# Function to perform t-test on all variables listed
+perform_t_tests <- function(var) {
+  coi_summary_comb %>%
+    select(PopClass, !!sym(var)) %>%
+    drop_na(!!sym(var)) %>%  # Remove NAs
+    expand(PopClass1 = PopClass, PopClass2 = PopClass) %>%
+    filter(PopClass1 < PopClass2) %>%
+    rowwise() %>%
+    mutate(
+      t_test = list(t.test(
+        formula = as.formula(paste(var, "~ PopClass")),  # Dynamic formula
+        data = coi_summary_comb %>% filter(PopClass %in% c(PopClass1, PopClass2))
+      )),
+      p_value = t_test$p.value,
+      t_value = t_test$statistic
+    ) %>%
+    ungroup() %>%
+    select(PopClass1, PopClass2, p_value, t_value) %>%  # Keep necessary columns
+    mutate(
+      variable = var,  # Store variable name
+      p_value = signif(p_value, 3),  # Round p-values
+      t_value = round(t_value, 3),
+      significance = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value < 0.05  ~ "*",
+        TRUE            ~ "ns"))
+}
+# Run t-tests for all variables and combine results
+t_test_results <- bind_rows(lapply(variables_to_test, perform_t_tests))
+
+
+write_csv(coi_summary_comb, "NEW_coi_summary.csv")
+write_csv(t_test_results, "STATS_coi_fig2a.csv")
+
+
+coi_summary_stats <- coi_summary_comb %>%
+  group_by(PopClass) %>%
+  summarise(
+    total_samples = n(),
+    mean_coi_mean = mean(post_coi_mean),
+      sd_coi_mean = sd(post_coi_mean),
+      se_coi_mean = sd(post_coi_mean) / sqrt(total_samples),
+      lower_ci_coi_mean = mean_coi_mean - 1.96 * se_coi_mean,
+      upper_ci_coi_mean = mean_coi_mean + 1.96 * se_coi_mean,
+    mean_coi_med = mean(post_coi_med),
+      sd_coi_med = sd(post_coi_med),
+      se_coi_med = sd(post_coi_med) / sqrt(total_samples),
+      lower_ci_coi_med = mean_coi_med - 1.96 * se_coi_med,
+      upper_ci_coi_med = mean_coi_med + 1.96 * se_coi_med,
+    `Poly count (COI)` = sum(post_coi_med > 1),
+    `Percent poly (COI)` = (`Poly count (COI)` / total_samples) * 100,
+    mean_ecoi_mean = mean(post_effective_coi_mean),
+      sd_ecoi_mean = sd(post_effective_coi_mean),
+      se_ecoi_mean = sd(post_effective_coi_mean) / sqrt(total_samples),
+      lower_ci_ecoi_mean = mean_ecoi_mean - 1.96 * se_ecoi_mean,
+      upper_ci_ecoi_mean = mean_ecoi_mean + 1.96 * se_ecoi_mean,
+    mean_ecoi_med = mean(post_effective_coi_med),
+      sd_ecoi_med = sd(post_effective_coi_med),
+      se_ecoi_med = sd(post_effective_coi_med) / sqrt(total_samples),
+      lower_ci_ecoi_med = mean_ecoi_med - 1.96 * se_ecoi_med,
+      upper_ci_ecoi_med = mean_ecoi_med + 1.96 * se_ecoi_med,
+    `Poly count (eCOI)` = sum(post_effective_coi_mean > 1.1),
+    `Percent poly (eCOI)` = (`Poly count (eCOI)` / total_samples) * 100,
+    .groups = 'drop'
+  )
+
+write.csv(coi_summary_stats, "STATS_coi_summary_all.csv")
+
+
+
+# Population colors
+pop_color <- c("Highlands" = "darkgreen", "Lowlands" = "purple")
+
+# COI mean summary
+fig2a <- ggplot(coi_summary_comb, aes(x = post_coi_mean)) + 
+  geom_histogram(
+    binwidth = 1, 
+    aes(fill = PopClass)) +
+  scale_x_continuous(breaks = seq(1, 9, 1)) +
+  geom_histogram( # Add eCOI histogram
+    aes(x = post_effective_coi_mean),
+    binwidth = 0.25,
+    color = "grey", fill = "grey",       # Set color to grey
+    alpha = 0.5) +
+    geom_vline(data = coi_summary_stats, aes(xintercept = mean_coi_med), color = "black", linetype = 'dashed', size = 0.5) + # Add mean COI line
+    geom_vline(data = coi_summary_stats, aes(xintercept = mean_ecoi_med), color = "black", linetype = 'dotted', size = 0.5) +
+  scale_fill_manual(values = pop_color, guide = "none") +
+  xlab("Mean COI/ eCOI") +
+  ylab("Count") +
+  theme_classic() +
+  facet_wrap(~PopClass, scales = "free", nrow = 2)
+fig2a
+ggsave("Plot_coi_distribution.jpeg", plot = fig2a, width = 4, height = 6, dpi = 300)
+
+
+```
+
+### Species correlations
+
+```{r species, echo=FALSE, warning = FALSE, message= FALSE} 
+
+species_loci <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/HRP_moire_setup/FINAL_all_loci_012125.csv") %>%
+  filter(Category == "Species") %>%
+  group_by(sample_id, Locus) %>%
+  summarise(total_reads = sum(Reads))
+
+pv <- species_loci %>%
+  filter(grepl("Pv", Locus))
+pv_samples <- pv$sample_id
+
+# Calculate Pf to Pv ratio
+ratioPfPv <- species_loci %>%
+        filter(grepl("Pv|Pf", Locus)) %>%
+        pivot_wider(names_from = Locus, values_from = total_reads) %>%
+        mutate(across(everything(), ~replace_na(.x, 0))) %>%
+        mutate(reads_ratio = `PvP01_12_v1-1184983-1185208-1AB`/`Pf3D7_13_v3-1041593-1041860-1AB`)
+
+```
+
+### Individual coi, effective coi, within-host relatedness
+for troubleshooting, combining data
+
+```{r moire COI_eCOI, echo=FALSE, warning = FALSE, message= FALSE} 
+
+# Plot individual coi median
+g1 <- ggplot(coi_summary_comb, aes(x = as.character(sample_id), y = post_coi_med,
+                           ymin = post_coi_lower,
+                           ymax = post_coi_upper)) +
+    geom_errorbar() +
+    geom_point() +
+    theme_classic(base_size = 10) +
+    theme(axis.text.x = element_blank()) +
+    facet_wrap(~PopClass, scales = "free") +
+    xlab("Sample code")
+g1
+
+# Plot individual coi mean
+g2 <- ggplot(coi_summary_comb, aes(x = as.character(sample_id), y = post_coi_mean,
+                           ymin = post_coi_lower,
+                           ymax = post_coi_upper)) +
+    geom_errorbar() +
+    geom_point() +
+    theme_classic(base_size = 10) +
+    theme(axis.text.x = element_blank()) +
+    facet_wrap(~PopClass, scales = "free") +
+    xlab("Sample code")
+g2
+
+
+# Plot individual effective coi median
+g3 <- ggplot(coi_summary_comb, aes(x = as.character(sample_id), y = post_effective_coi_med,
+                           ymin = post_effective_coi_lower,
+                           ymax = post_effective_coi_upper)) +
+    geom_errorbar() +
+    geom_point() +
+    theme_classic(base_size = 10) +
+    theme(axis.text.x = element_blank()) +
+    facet_wrap(~PopClass, scales = "free") +
+    xlab("Sample code")
+g3
+
+# Plot individual effective coi mean
+g4 <- ggplot(coi_summary_comb, aes(x = as.character(sample_id), y = post_effective_coi_mean,
+                           ymin = post_effective_coi_lower,
+                           ymax = post_effective_coi_upper)) +
+    geom_errorbar() +
+    geom_point() +
+    theme_classic(base_size = 10) +
+    theme(axis.text.x = element_blank()) +
+    facet_wrap(~PopClass, scales = "free") +
+    xlab("Sample code")
+g4
+
+```
+
+### COI distribution
+Fig 2b: correlation between COI and eCOI
+Fig 2c: species distribution
+Combines panels to make final Figure 2
+
+```{r coi_deeper, echo=FALSE, warning = FALSE, message= FALSE}
+
+# Add species info
+coi_summary_comb %<>%
+  mutate(pv_status = case_when(
+    sample_id %in% pv_samples & pvqcopyul > 0 ~ "Pf + Pv",
+    .default = "Pf"
+  )) %>%
+  mutate(clonality = case_when(
+    post_coi_med > 1 ~ "polyclonal",
+    post_coi_med == 1 ~ "monoclonal"
+  ))
+
+  
+# Count for N to annotate
+pop_counts <- coi_summary_comb %>%
+  count(PopClass, pv_status, clonality) %>%
+  group_by(PopClass) %>%
+  mutate(percentage = round(n / sum(n) * 100, 1))
+# Plot
+color_clone <- c("monoclonal" = "skyblue", "polyclonal" = "brown")
+fig2c <- ggplot(coi_summary_comb, aes(x = PopClass, y = pfqparul)) +
+  geom_boxplot(
+    aes(fill = clonality), 
+    alpha = 0.3, 
+    outlier.shape = NA, 
+    position = position_dodge(width = 0.6)) +
+  geom_jitter(
+    aes(color = clonality),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.6),
+    size = 1, alpha = 0.5) +
+  scale_fill_manual(values = color_clone) +
+  scale_color_manual(values = color_clone) +
+  scale_y_log10(labels = scales::trans_format("log10", math_format(10^.x))) +
+  facet_wrap(~pv_status) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    axis.title.x = element_blank()) +
+  ylab(expression("Pf p/μL"))
+
+fig2c
+ggsave(plot = fig2c, "Plot_clonality_parasitemia.jpeg", height = 8, width = 6, dpi = 300)
+
+
+
+# Plot correlation between coi and eff_coi, by population
+max_coi <- round(max(coi_summary_comb$post_coi_mean))
+
+ggplot(coi_summary_comb, aes(x = post_coi_mean, y = post_effective_coi_mean, color = PopClass)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "solid", color = "gray") +
+  facet_wrap(~ PopClass) +
+  scale_color_manual(values = c("Highlands" = "darkgreen", "Lowlands" = "purple")) +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, max_coi + 1), breaks = seq(1, max_coi + 1, 1)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, max_coi + 1), breaks = seq(1, max_coi + 1, 1)) +
+  xlab("COI") + 
+  ylab("eCOI") +
+  theme_classic()
+
+# Test whether the linear regression is different
+# Fit linear models by population
+library(broom)
+# Tidy linear model output by population
+lm_by_pop <- coi_summary_comb %>%
+  group_by(PopClass) %>%
+  do(tidy(lm(post_effective_coi_mean ~ post_coi_mean, data = .)))
+# View model coefficients (intercept and slope per population)
+lm_by_pop
+lm_slopes <- lm_by_pop %>%
+  select(PopClass, term, estimate) %>%
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  rename(intercept = `(Intercept)`, slope = `post_coi_mean`)
+# 1) Extract slope/intercept as above
+# 2) Create equation labels as character strings
+lm_slopes <- lm_slopes %>%
+  mutate(
+    equation_label = paste0("y = ", round(intercept, 2), " + ", round(slope, 2), "x"))
+# 3) Merge with PopClass so we can color the text accordingly
+label_data <- coi_summary_comb %>%
+  distinct(PopClass) %>%
+  left_join(lm_slopes, by = "PopClass") %>%
+  mutate(label_color = ifelse(PopClass == "Highlands", "darkgreen", "purple")) %>%
+  mutate(label_x = 0.5,  # left side of plot
+         label_y = seq(from = max_coi + 0.8, by = -0.7, length.out = n())) 
+# New plot
+fig2b <- ggplot(coi_summary_comb, aes(x = post_coi_mean, y = post_effective_coi_mean, color = PopClass)) +
+  geom_point() +
+  geom_smooth(aes(group = PopClass), method = "lm", se = FALSE, color = "black", linetype = "solid") +
+  # geom_text(
+  #   data = label_data,
+  #   aes(x = label_x, y = label_y, label = equation_label),
+  #   color = label_data$label_color,
+  #   hjust = 0,
+  #   inherit.aes = FALSE
+  # ) +
+  scale_color_manual(values = c("Highlands" = "darkgreen", "Lowlands" = "purple")) +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, max_coi + 1), breaks = seq(1, max_coi + 1, 1)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, max_coi + 1), breaks = seq(1, max_coi + 1, 1)) +
+  xlab("COI") +
+  ylab("eCOI") +
+  theme_classic()
+fig2b
+ggsave(plot = fig2b, "Plot_coi_ecoi_correl.jpeg", height = 6, width = 7, dpi = 300)
+
+## STATS
+# Is the slope significantly different?
+lm_interaction <- lm(post_effective_coi_mean ~ post_coi_mean * PopClass, data = coi_summary_comb)
+summary(lm_interaction) # Not statistically different slope
+# Save this stat
+lm_summary <- summary(lm_interaction)$coefficients
+lm_summary_df <- as.data.frame(lm_summary)
+write.csv(lm_summary_df, "STAT_coi_ecoi_interaction_pop.csv", row.names = TRUE)
+
+
+# Combine Figure 2 panels
+fig2bc <- ggarrange(fig2b, fig2c, nrow = 2, labels = c("b", "c"))
+fig2 <- ggarrange(fig2a, fig2bc, ncol = 2, widths = c(3, 4), labels = c("a", ""))
+# Save Figure 2
+ggsave(plot = fig2, "Fig2_coi_general.jpeg", height = 6, width = 9, dpi = 300)
+
+
+# Here we make the gtsummary table 
+coi_arrange <- coi_summary_comb %>%
+  mutate(`Poly count (COI)` = post_coi_med > 1) %>%
+  mutate(`Poly count (eCOI)` = post_effective_coi_med > 1.1) %>%
+  rename(`COI mean` = post_coi_mean) %>%
+  rename(`COI median` = post_coi_med) %>%
+  rename(`eCOI mean` = post_effective_coi_mean) %>%
+  rename(`eCOI median` = post_effective_coi_med) %>%
+  rename(`naive COI` = naive_coi) %>%
+  mutate(`naive COI` = as.numeric(`naive COI`))
+# Create summary table for COI
+table_coi <- coi_arrange %>%
+  tbl_summary(
+    by = PopClass,
+    include = c(`COI mean`, `COI median`, `eCOI mean`, `eCOI median`, 
+                `Poly count (COI)`, `Poly count (eCOI)`),
+    statistic = list(
+      `COI mean` ~ "{mean} ({sd})",
+      `COI median` ~ "{mean} ({sd})",
+      `eCOI mean` ~ "{mean} ({sd})",
+      `eCOI median` ~ "{mean} ({sd})",
+      `Poly count (COI)` ~ "{n} ({p}%)",
+      `Poly count (eCOI)` ~ "{n} ({p}%)"
+    )
+  ) %>%
+  add_p() %>%
+  modify_header(label = "posterior COI")
+table_coi
+
+b <- table_coi %>%
+  as_gt()
+# Save the gt table as an image
+gtsave(b, filename = "Table_coi_distribution.pdf")
+
+
+```
+
+### Heterozygosity
+compare median He between HL and LL
+
+```{r heterozygosity, echo=FALSE, warning = FALSE, message= FALSE}
+
+# Get He from moire results
+## HL
+moire_results_hl$chains[[1]]$allele_freqs <- lapply(moire_results_hl$chains[[1]]$allele_freqs, function(af_chain) {
+     lapply(af_chain, function(sample) {
+         replace(sample, which(is.na(sample)), 0)
+     })
+ })
+he_hl <- summarize_he(moire_results_hl)
+he_hl$PopClass <- "Highlands"
+hist(he_hl$post_stat_mean)
+
+## LL
+moire_results_ll$chains[[1]]$allele_freqs <- lapply(moire_results_ll$chains[[1]]$allele_freqs, function(af_chain) {
+     lapply(af_chain, function(sample) {
+         replace(sample, which(is.na(sample)), 0)
+     })
+ })
+he_ll <- summarize_he(moire_results_ll)
+he_ll$PopClass <- "Lowlands"
+hist(he_ll$post_stat_mean)
+
+# Merge Hl and LL
+he_merge <- rbind(he_hl, he_ll)
+
+
+
+# Do summary stats
+he_merge_summary <- he_merge %>%
+  group_by(PopClass) %>%
+  summarise(total_n = n(),
+    mean_he = mean(post_stat_mean),
+      sd_mean = sd(post_stat_mean),
+      se_mean = sd(post_stat_mean) / sqrt(total_n),
+      lower_ci_mean = mean_he - 1.96 * se_mean,
+      upper_ci_mean = mean_he + 1.96 * se_mean,
+    median_he = median(post_stat_med),
+      sd_med = sd(post_stat_med),
+      se_med = sd(post_stat_med) / sqrt(total_n),
+      lower_ci_med = median_he - 1.96 * se_med,
+      upper_ci_med = median_he + 1.96 * se_med)
+
+# Wilcoxon test to see if median He between HL and LL are different
+# Ensure PopClass is a factor and remove NAs
+he_clean <- he_merge %>%
+  filter(!is.na(post_stat_med) & !is.na(PopClass)) %>%
+  mutate(PopClass = as.factor(PopClass))
+wilcox_pvalue <- wilcox.test(post_stat_med ~ PopClass, data = he_clean)$p.value
+he_stats <- tibble(
+  wilcox_pvalue = wilcox_pvalue)
+
+write_csv(he_merge, "heterozygosity/heterozygosity_all_loci.csv")
+write_csv(he_merge_summary, "heterozygosity/heterozygosity_summary.csv")
+
+
+```
+
+### Allele frequency (done on Arwen)
+Here we calculate the naive allele frequencies of HL and LL separately, then use a weighted average. A single input for allele frequencies is currently needed to feed into Dcifer. We will call this afreq and this will be used to run Dcifer in the subsequent chunk. I ran this on Arwen already, so can just import (NEW_hrp_allele_freq_avg.csv)
+
+```{r allele freq, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+# Import
+afreq <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia//HRP_analysis/hrp_moire/NEW_hrp_allele_freq_avg.csv")
+
+
+# Naive AF
+naive_AF_list_hl <- calculate_naive_allele_frequencies(dat_hl$data)
+naive_AF_table_hl <- naive_AF_list_hl %>%
+  map_df(as_tibble) %>%
+  mutate(target = map_depth(naive_AF_list_hl, 1, names) %>% unlist(use.names = F)) %>%
+  rename(naive_AF.hl = value) %>%
+  mutate(locus = str_extract(target, "^[^.]+")) %>%
+  rename(allele = target)
+# Moire AF
+AF_list_hl <- calculate_median_afs(moire_results_hl)
+AF_table_hl <- AF_list_hl %>%
+  map_df(as_tibble) %>%
+  mutate(target = map_depth(naive_AF_list_hl, 1, names) %>% unlist(use.names = F)) %>%
+  rename(mean_AF.hl = value) %>%
+  mutate(locus = str_extract(target, "^[^.]+")) %>%
+  rename(allele = target) %>%
+  select(-locus) %>%
+  full_join(naive_AF_table_hl, by = "allele")
+
+# Now do the same for LL
+# Naive AF
+naive_AF_list_ll <- calculate_naive_allele_frequencies(dat_ll$data)
+naive_AF_table_ll <- naive_AF_list_ll %>%
+  map_df(as_tibble) %>%
+  mutate(target = map_depth(naive_AF_list_ll, 1, names) %>% unlist(use.names = F)) %>%
+  rename(naive_AF.ll = value) %>%
+  mutate(locus = str_extract(target, "^[^.]+")) %>%
+  rename(allele = target)
+# Moire AF
+AF_list_ll <- calculate_median_afs(moire_results_ll)
+AF_table_ll <- AF_list_ll %>%
+  map_df(as_tibble) %>%
+  mutate(target = map_depth(naive_AF_list_ll, 1, names) %>% unlist(use.names = F)) %>%
+  rename(mean_AF.ll = value) %>%
+  mutate(locus = str_extract(target, "^[^.]+")) %>%
+  rename(allele = target) %>%
+  select(-locus) %>%
+  full_join(naive_AF_table_ll, by = "allele")
+
+# Merge together HL and LL
+# Average moire AF
+AF_merge <- AF_table_hl %>%
+  full_join(AF_table_ll, by = "allele") %>%
+  mutate(mean_AF.hl = ifelse(is.na(mean_AF.hl), 0, mean_AF.hl),
+         mean_AF.ll = ifelse(is.na(mean_AF.ll), 0, mean_AF.ll)) %>%
+  mutate(avg_AF = ((mean_AF.hl + mean_AF.ll) / 2)) %>%
+  rowwise() %>%
+  mutate(sd = sd(c(mean_AF.hl, mean_AF.ll), na.rm = TRUE)) %>%
+  mutate(locus = coalesce(locus.x, locus.y)) %>%
+  select(-c(locus.x, locus.y))
+write.csv(AF_merge, "hrp_allele_freq_avg.csv")
+
+# Format allele frequencies (avg) for Dcifer
+afreq <- formatAfreq(AF_merge, lvar = "locus", avar = "allele", fvar = "avg_AF")
+write_rds(afreq, "./hrp_dcifer/mean_allele_frequencies.rds")
+
+# Plot AF
+plot_AF <- function(AF_merge){
+  g <- ggplot(AF_merge) +
+    geom_point(aes(y = mean_AF.hl, x = forcats::fct_reorder(allele, avg_AF), color = "Highlands"), alpha = .2, show.legend = TRUE) +
+    geom_point(aes(y = mean_AF.ll, x = forcats::fct_reorder(allele, avg_AF), color = "Lowlands"), alpha = .2, show.legend = TRUE) +
+    geom_point(aes(y = avg_AF, x = forcats::fct_reorder(allele, avg_AF), color = "Average"), size = 1, alpha = 1, show.legend = TRUE) +
+    ylab("Allele Frequency") +
+    xlab("Allele") +
+    theme_classic(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0, hjust = 1, size = 5.5)) +
+    expand_limits(x = 0, y = 0)
+    ggtitle("Allele Frequency") +
+    scale_color_manual(values = c("Highlands" = "blue", "Lowlands" = "red", "Average" = "black"))
+  g
+}
+
+plot_AF(AF_merge)
+
+
+
+```
+
+
+

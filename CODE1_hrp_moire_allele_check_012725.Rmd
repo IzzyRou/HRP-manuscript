@@ -1,0 +1,438 @@
+---
+title: "HRP - allele check & moire setup"
+author: "Created by: WL"
+date: "`r Sys.Date()`"
+output: html_document
+
+---
+
+### Load libraries and working directory
+
+```{r load libraries, echo=FALSE, warning = FALSE, message= FALSE}
+
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(reshape2)
+library(tidyr)
+library(tidyverse)
+library(stringr)
+library(tools)
+library(purrr)
+library(parallel)
+library(data.table)
+library(vctrs)
+library(plotly)
+library(shiny)
+library(viridis)
+library(gridExtra)
+library(ggrepel)
+library(readxl)
+library(scales)
+library(ggbeeswarm)
+library(gtsummary)
+
+```
+
+Import all filtered allele data. Merge them together.
+
+```{r import, echo = F, warning = F, message= F}
+
+setwd("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/hrp_moire_setup")
+
+## import filtered allele data from QC
+filt_allele_data1 <- read_csv("./allele_data_to_use/HRP_plate03-08_full_allele_data.csv") %>%
+  select(SampleID, StudySubject, Locus, ASV, Reads, Allele, PseudoCIGAR, Category, Barcode)
+filt_allele_data1$SampleID <- sub("_S.*", "", filt_allele_data1$SampleID)
+
+filt_allele_data2 <- read_csv("./allele_data_to_use/HRP_plates09-11,15_full_allele_data.csv") %>%
+  select(SampleID, StudySubject, Locus, ASV, Reads, Allele, PseudoCIGAR, Category) %>%
+  mutate(Barcode = str_extract(SampleID, "\\d{10}"))
+filt_allele_data2$SampleID <- sub("_S.*", "", filt_allele_data2$SampleID)
+
+filt_allele_data3 <- read_csv("./allele_data_to_use/HRP_plates13-17_full_allele_data.csv") %>%
+  select(SampleID, StudySubject, Locus, ASV, Reads, Allele, PseudoCIGAR, Category) %>%
+  mutate(Barcode = str_extract(SampleID, "\\d{10}"))
+
+filt_allele_data4 <- read_csv("./allele_data_to_use/HRP_plates2R-3R_full_allele_data.csv") %>%
+  select(SampleID, StudySubject, Locus, ASV, Reads, Allele, PseudoCIGAR, Category) %>%
+  mutate(Barcode = str_extract(SampleID, "\\d{10}"))
+# Merge
+final_allele_data <- rbind(filt_allele_data1, filt_allele_data2,
+                           filt_allele_data3, filt_allele_data4)
+final_allele_data$sample_id <- str_extract(final_allele_data$SampleID, "AH\\d{7}")
+final_allele_data$sample_id <- sub("AH", "", final_allele_data$sample_id)
+
+filt_allele_data5 <- read_csv("./allele_data_to_use/HRP_plates4R-8R_full_allele_data.csv") %>%
+  filter(SpecimenType == "DNA (DBS)") %>%
+  select(SampleID, StudySubject, Locus, ASV, Reads, Allele, PseudoCIGAR, Category, Barcode)
+filt_allele_data5$sample_id <- str_extract(filt_allele_data5$StudySubject, "AH\\d{7}")
+filt_allele_data5$sample_id <- sub("AH", "", filt_allele_data5$sample_id)
+
+final_allele_data <- rbind(final_allele_data, filt_allele_data5)
+
+
+
+final_allele_data %<>%
+  distinct() %>%
+  filter(StudySubject != "EMPTY") %>%
+  # mutate(sample_id = str_extract(StudySubject, "\\d+")) %>%
+  filter(!is.na(sample_id)) %>%
+  group_by(SampleID, ASV, Barcode, sample_id, Locus, Allele, PseudoCIGAR, Category) %>% # Reworked to include SampleID
+  summarise(Reads = sum(Reads))
+
+length(unique(final_allele_data$sample_id))
+length(unique(final_allele_data$Barcode))
+
+# Check if any duplicated rows exist
+any(duplicated(final_allele_data))
+
+
+### _____ Filter out suspicious samples and those to redo ______ #######
+
+# These we exclude entirely
+to_exclude <- read.csv("./suspicious_samples/sus_exclude.csv")
+to_exclude <- to_exclude$sample_id
+# These we are re-extracting
+to_redo <- read.csv("./suspicious_samples/sus_reextract.csv")
+to_redo <- to_redo$sample_id
+
+final_allele_data <- final_allele_data %>%
+  filter(!(sample_id %in% to_exclude)) %>%
+  filter(!(sample_id %in% to_redo))
+
+### _____ Filter out suspicious samples and those to redo ______ #######
+
+```
+
+This is the new section for merging the redone suspicious samples.
+
+```{r re-merge, echo = F, warning = F, message= F}
+
+# Import new, redone samples
+filt_allele_data_sus <- read_csv("./allele_data_to_use/HRP_sus_full_allele_data.csv") 
+filt_allele_data6 <- filt_allele_data_sus %>%
+  mutate(sample_id = as.character(QR_code)) %>%
+  select(SampleID, Barcode, sample_id, Locus, ASV, Allele, PseudoCIGAR, Category, Reads)
+
+# Filter out the duplicated samples as determined by 01-16-25 analysis
+reextracted <- read_csv("./suspicious_samples/reextracted_samples_verdict_031025.csv")
+duplicated <- reextracted %>%
+  filter(filter_out == "no") %>%
+  pull(sample_id)
+
+# Remove these faked spots from filt_allele_data6
+filt_allele_data6 %<>%
+  filter(sample_id %in% duplicated)
+
+# Merge with filtered allele data
+final_allele_data <- rbind(final_allele_data, filt_allele_data6)
+
+#### NOW FILTER BY 10 READS
+final_allele_data %<>%
+  filter(Reads > 10) %>%
+  distinct()
+
+# What is the final dataset now?
+length(unique(final_allele_data$sample_id))
+length(unique(final_allele_data$Barcode))
+
+# Check if any duplicated rows exist
+any(duplicated(final_allele_data)) # none
+
+
+### Now we have to merge the pseudocigars, esp. important with multiple runs
+### Rearrange allele.type by pseudo_cigar (not asv - variations in masked regions are not considered!)
+cigar <- final_allele_data %>% 
+  select (Locus, PseudoCIGAR) %>% 
+  group_by(Locus) %>% 
+  distinct(PseudoCIGAR) %>% 
+  arrange(Locus) %>%
+  dplyr::mutate(type = paste0("t", dplyr::cur_group_id()))
+cigar$allele <- paste(cigar$type, rowid(cigar$type), sep = ".")
+
+### Make concatenated allele data
+cigar_select <- cigar %>% select(Locus, PseudoCIGAR, allele)
+all_data <- left_join(final_allele_data, cigar_select)
+all_data <- all_data %>%
+  select(-Allele)  %>%
+  group_by(sample_id, Locus, ASV, allele, PseudoCIGAR, Category, SampleID) %>%
+  summarise(Reads = sum(Reads), .groups = 'drop') %>%
+  ungroup() %>%
+  arrange(sample_id, Locus) %>%
+  distinct()
+length(unique(all_data$sample_id))
+
+
+write.csv(all_data, "FINAL_all_loci_012725.csv", row.names = F)
+
+
+
+##### FOR DIVERSITY ONLY ########
+# We only care about diversity loci, so filter for those
+data_diversity <- all_data %>%
+  filter(Category == "Diversity")
+
+# Sample size of the data after merge
+sample_size <- n_distinct(data_diversity$sample_id)
+print(sprintf("Sample size= %s", sample_size))
+
+# Export the full allele table too
+write.csv(data_diversity, "FINAL_diversity_allele_data_012725.csv", row.names = F)
+
+```
+
+Preview allele data. Visualize the distribution of alleles.
+
+```{r preview, echo=FALSE, warning = FALSE, message= FALSE}
+
+Locus_no <- n_distinct(data_diversity$Locus)
+print(sprintf("All Locus = %s", Locus_no))
+
+# Count number of alleles per Locus per sample
+allele_count <- data_diversity %>% 
+  group_by(sample_id, Locus) %>%
+  summarize(n.alleles = n()) %>%
+  group_by(Locus) %>% 
+  arrange(-n.alleles)
+# Allele range in each sample
+print(sprintf("%s to %s alleles per Locus per sample",
+              min(allele_count$n.alleles), max(allele_count$n.alleles)))
+
+n_allele <- data_diversity %>%
+  distinct(sample_id, Locus, allele, .keep_all = TRUE) %>%
+  group_by(sample_id, Locus) %>%
+  summarize(n.alleles = n(), norm.reads.locus = Reads/sum(Reads))
+
+# allele stats
+allele_stats <- n_allele %>%
+  group_by(Locus) %>%
+  summarize(mean = mean(n.alleles), median = median(n.alleles),
+            min = min(n.alleles), max = max(n.alleles)) %>%
+  arrange(-max)
+print(head(allele_stats))
+
+
+# Define categories for number of alleles
+n_allele_poly <- n_allele %>%
+  filter(n.alleles >1) %>%
+  mutate(allele_category = case_when(
+    n.alleles == 2 ~ "2",
+    n.alleles == 3 ~ "3",
+    n.alleles %in% 4:5 ~ "4-5",
+    n.alleles > 5 ~ "6+"
+  )) %>%
+  mutate(chromosome = str_extract(Locus, "(?<=Pf3D7_)\\d{2}(?=_v3)"))
+# Calculate proportion of samples with each allele category per locus
+n_allele_plot <- n_allele_poly %>%
+  group_by(Locus, allele_category, chromosome) %>%
+  summarize(count = n()) %>%
+  group_by(Locus) %>%
+  mutate(prop.allele = count / sum(count))
+
+# Reorder the allele_category factor levels
+n_allele_plot <- n_allele_plot %>%
+  mutate(allele_category = factor(allele_category, levels = c("2", "3", "4-5", "6+")))
+
+# Set order to proportion of 2 alleles
+level_2allele <- n_allele_plot %>%
+    filter(allele_category == "2") %>%
+    arrange(-prop.allele) %>%
+    pull(Locus)
+n_allele_plot <- n_allele_plot %>%
+  mutate(Locus = factor(Locus, levels = level_2allele))
+
+# Plotting the stacked bar plot
+g1 <- ggplot(n_allele_plot, aes(x = factor(Locus, level = level_2allele), y = prop.allele, fill = allele_category)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Locus", y = "Proportion", fill = "Number of Alleles") +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) +
+  facet_wrap(~chromosome, scales = "free_x")
+g1p <- ggplotly(g1)
+g1p
+
+```
+
+We should filter out minor alleles by 1% frequency, and a 1% population frequency
+How does the allele distribution change after filtering?
+
+```{r filter, echo=FALSE, warning = FALSE, message= FALSE}
+
+# Add most recent metadata
+metadata <- read_csv("/Users/williamlouie/Library/CloudStorage/Box-Box/HRP_Ethiopia/metadata/EthiopiaHRP_qPCRpos_collated_26Jan2025.csv") %>%
+  rename(sample_id = participantID) %>%
+  select(sample_id, PopClass) %>%
+  mutate(sample_id = as.character(sample_id))
+
+# reformat data
+data_format <- data_diversity %>%
+  group_by(sample_id, Locus) %>%
+  mutate(norm.reads.locus = Reads/sum(Reads)) %>%
+  left_join(metadata, by = "sample_id") %>%
+  rename("locus" = "Locus") %>%
+  select (sample_id, locus, allele, Reads, PseudoCIGAR, norm.reads.locus, PopClass)
+
+# separate into HL and LL
+data_hl <- data_format %>%
+  filter(PopClass == "Highlands")
+data_ll <- data_format %>%
+  filter(PopClass == "Lowlands")
+
+# Select alleles with low population frequency
+data_hl.pop_freq <- data_hl %>% 
+  group_by(allele, locus) %>%
+  summarize(host_mean_AF = mean(norm.reads.locus),
+                sample_count = n(),
+                pop_AF = n()/n_distinct(data_hl$sample_id))
+# Filter minor alleles from data
+minor_alleles <- data_hl.pop_freq %>% filter(pop_AF < 0.01) %>% 
+  pull(allele) # 974 for <0.01
+data_hl_filt <- data_hl %>%
+  filter(!allele %in% minor_alleles)
+
+# Select alleles with low population frequency
+data_ll.pop_freq <- data_ll %>% 
+  group_by(allele, locus) %>%
+  summarize(host_mean_AF = mean(norm.reads.locus),
+                sample_count = n(),
+                pop_AF = n()/n_distinct(data_ll$sample_id))
+# Filter minor alleles from data
+minor_alleles <- data_ll.pop_freq %>% filter(pop_AF < 0.01) %>% 
+  pull(allele) # 2338 for <0.01
+data_ll_filt <- data_ll %>%
+  filter(!allele %in% minor_alleles)
+
+data_filt_pop <- rbind(data_hl_filt, data_ll_filt)
+
+
+# Filter by 1% prevalence
+data_filt <- data_filt_pop %>%
+  group_by(sample_id, locus) %>%
+  mutate(norm.reads.locus = Reads/sum(Reads)) %>%
+  filter(norm.reads.locus > 0.01) %>%
+  distinct()
+
+# How many final alleles are there?
+print(length(unique(data_filt$allele))) #786
+
+# Export the filtered allele table too
+write.csv(data_filt, "FINAL_filtered_allele_data_012725.csv", row.names = F)
+
+
+```
+
+Now check allele stats after filtering
+
+```{r check, echo=FALSE, warning = FALSE, message= FALSE}
+
+# Now check again
+# Count number of alleles per Locus per sample
+allele_count_filt <- data_filt %>% 
+  distinct(sample_id, locus, allele) %>%
+  group_by(sample_id, locus) %>%
+  summarize(n.alleles = n()) %>%
+  group_by(locus) %>% 
+  arrange(-n.alleles)
+# Allele range in each sample
+print(sprintf("%s to %s alleles per Locus per sample",
+              min(allele_count_filt$n.alleles), max(allele_count_filt$n.alleles)))
+
+n_allele <- data_filt %>%
+  distinct(sample_id, locus, allele, .keep_all = TRUE) %>%
+  group_by(sample_id, locus) %>%
+  summarize(n.alleles = n(), norm.reads.locus = Reads/sum(Reads))
+
+# allele stats
+allele_stats <- n_allele %>%
+  group_by(locus) %>%
+  summarize(mean = mean(n.alleles), median = median(n.alleles),
+            min = min(n.alleles), max = max(n.alleles)) %>%
+  arrange(-max)
+print(head(allele_stats))
+
+
+# Define categories for number of alleles
+n_allele_poly <- n_allele %>%
+  filter(n.alleles >1) %>%
+  mutate(allele_category = case_when(
+    n.alleles == 2 ~ "2",
+    n.alleles == 3 ~ "3",
+    n.alleles %in% 4:5 ~ "4-5",
+    n.alleles > 5 ~ "6+"
+  )) %>%
+  mutate(chromosome = str_extract(locus, "(?<=Pf3D7_)\\d{2}(?=_v3)"))
+# Calculate proportion of samples with each allele category per locus
+n_allele_plot <- n_allele_poly %>%
+  group_by(locus, allele_category, chromosome) %>%
+  summarize(count = n()) %>%
+  group_by(locus) %>%
+  mutate(prop.allele = count / sum(count))
+
+# Reorder the allele_category factor levels
+n_allele_plot <- n_allele_plot %>%
+  mutate(allele_category = factor(allele_category, levels = c("2", "3", "4-5", "6+")))
+
+# Set order to proportion of 2 alleles
+level_2allele <- n_allele_plot %>%
+    filter(allele_category == "2") %>%
+    arrange(-prop.allele) %>%
+    pull(locus)
+n_allele_plot <- n_allele_plot %>%
+  mutate(locus = factor(locus, levels = level_2allele))
+
+# Plotting the stacked bar plot
+g2 <- ggplot(n_allele_plot, aes(x = factor(locus, level = level_2allele), y = prop.allele, fill = allele_category)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Locus", y = "Proportion", fill = "Number of Alleles") +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) +
+  facet_wrap(~chromosome, scales = "free_x")
+g2p <- ggplotly(g2)
+g2p
+
+
+## Rough estimate of naive COI
+
+# Calculate the 97th percentile of allele numbers for each sample
+naive_coi <- data_filt %>%
+  group_by(sample_id, locus) %>%
+  summarise(num_unique_alleles = n_distinct(allele), .groups = "drop") %>%
+  group_by(sample_id) %>%
+  summarise(max_n.alleles = max(num_unique_alleles),
+            percentile_97 = quantile(num_unique_alleles, 0.97), .groups = "drop") %>%
+  mutate(clonality_97th = case_when(percentile_97 > 1 ~ "polyclonal",
+                                    percentile_97 == 1 ~ "monoclonal"))
+write_csv(naive_coi, "naive_coi_97_percentile.csv")
+
+```
+
+Now let's make the moire input
+
+```{r moire_input, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Make moire input
+moire_input <- data_filt %>% 
+  distinct(sample_id, locus, allele, PopClass) %>%
+  select(sample_id, locus, allele, PopClass)
+write.csv(moire_input, "FINAL_moire_input_012725.csv", row.names = F)
+
+hl <- moire_input %>%
+  filter(PopClass == "Highlands") 
+hl_sample_size <- n_distinct(hl$sample_id)
+print(sprintf("HL Sample size= %s", hl_sample_size))
+
+ll <- moire_input %>%
+  filter(PopClass == "Lowlands") 
+ll_sample_size <- n_distinct(ll$sample_id)
+print(sprintf("LL Sample size= %s", ll_sample_size))
+
+```
+
+Run moire on Arwen... then import the results back here
+
+```{r post-processing, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+
+```
+
